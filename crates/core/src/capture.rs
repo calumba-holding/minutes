@@ -265,8 +265,12 @@ pub fn record_to_wav(
             .map_err(|e| CaptureError::Io(std::io::Error::other(format!("WAV finalize: {}", e))))?;
     }
 
-    eprintln!("[minutes] Captured {} samples ({:.1}s), peak audio level during recording: {}",
-        total_samples, duration_secs, AUDIO_LEVEL.load(Ordering::Relaxed));
+    eprintln!(
+        "[minutes] Captured {} samples ({:.1}s), peak audio level during recording: {}",
+        total_samples,
+        duration_secs,
+        AUDIO_LEVEL.load(Ordering::Relaxed)
+    );
 
     if total_samples == 0 {
         return Err(CaptureError::EmptyRecording);
