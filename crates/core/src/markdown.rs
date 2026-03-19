@@ -54,6 +54,8 @@ pub struct Frontmatter {
     pub action_items: Vec<ActionItem>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub decisions: Vec<Decision>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub intents: Vec<Intent>,
 }
 
 /// A structured action item extracted from a meeting.
@@ -74,6 +76,26 @@ pub struct Decision {
     pub text: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub topic: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum IntentKind {
+    ActionItem,
+    Decision,
+    OpenQuestion,
+    Commitment,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Intent {
+    pub kind: IntentKind,
+    pub what: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub who: Option<String>,
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub by_date: Option<String>,
 }
 
 /// Result of writing a meeting/memo to disk.
@@ -273,6 +295,7 @@ mod tests {
             context: None,
             action_items: vec![],
             decisions: vec![],
+            intents: vec![],
         }
     }
 
@@ -347,6 +370,31 @@ mod tests {
 
         let result = write(&fm, "Voice memo text", None, None, &config).unwrap();
         assert!(result.path.to_str().unwrap().contains("memos"));
+    }
+
+    #[test]
+    fn frontmatter_serializes_intents_when_present() {
+        let dir = TempDir::new().unwrap();
+        let config = Config {
+            output_dir: dir.path().to_path_buf(),
+            ..Config::default()
+        };
+
+        let mut fm = test_frontmatter();
+        fm.intents = vec![Intent {
+            kind: IntentKind::Commitment,
+            what: "Share revised pricing model".into(),
+            who: Some("sarah".into()),
+            status: "open".into(),
+            by_date: Some("Tuesday".into()),
+        }];
+
+        let result = write(&fm, "Transcript", None, None, &config).unwrap();
+        let content = fs::read_to_string(&result.path).unwrap();
+        assert!(content.contains("intents:"));
+        assert!(content.contains("kind: commitment"));
+        assert!(content.contains("who: sarah"));
+        assert!(content.contains("by_date: Tuesday"));
     }
 
     #[test]

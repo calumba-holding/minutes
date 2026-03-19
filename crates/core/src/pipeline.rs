@@ -141,6 +141,7 @@ where
     // Step 3: Summarize + extract structured intent
     let mut structured_actions: Vec<markdown::ActionItem> = Vec::new();
     let mut structured_decisions: Vec<markdown::Decision> = Vec::new();
+    let mut structured_intents: Vec<markdown::Intent> = Vec::new();
 
     let summary: Option<String> = if config.summarization.engine != "none" {
         on_progress(PipelineStage::Summarizing);
@@ -158,6 +159,7 @@ where
             // Extract structured data from the summary
             structured_actions = extract_action_items(&s);
             structured_decisions = extract_decisions(&s);
+            structured_intents = extract_intents(&s);
             summarize::format_summary(&s)
         })
     } else {
@@ -188,6 +190,7 @@ where
         context: pre_context,
         action_items: structured_actions,
         decisions: structured_decisions,
+        intents: structured_intents,
     };
 
     tracing::info!(step = "write", "writing markdown");
@@ -439,6 +442,66 @@ fn extract_decisions(summary: &summarize::Summary) -> Vec<markdown::Decision> {
         .collect()
 }
 
+fn parse_actor_prefix(text: &str) -> (Option<String>, String) {
+    if let Some(rest) = text.strip_prefix('@') {
+        if let Some(colon_pos) = rest.find(':') {
+            let who = rest[..colon_pos].trim();
+            let what = rest[colon_pos + 1..].trim();
+            return ((!who.is_empty()).then(|| who.to_string()), what.to_string());
+        }
+    }
+    (None, text.trim().to_string())
+}
+
+fn extract_intents(summary: &summarize::Summary) -> Vec<markdown::Intent> {
+    let mut intents = Vec::new();
+
+    for item in extract_action_items(summary) {
+        intents.push(markdown::Intent {
+            kind: markdown::IntentKind::ActionItem,
+            what: item.task,
+            who: (item.assignee != "unassigned").then_some(item.assignee),
+            status: item.status,
+            by_date: item.due,
+        });
+    }
+
+    for decision in extract_decisions(summary) {
+        intents.push(markdown::Intent {
+            kind: markdown::IntentKind::Decision,
+            what: decision.text,
+            who: None,
+            status: "decided".into(),
+            by_date: None,
+        });
+    }
+
+    for question in &summary.open_questions {
+        let (who, what) = parse_actor_prefix(question);
+        intents.push(markdown::Intent {
+            kind: markdown::IntentKind::OpenQuestion,
+            what,
+            who,
+            status: "open".into(),
+            by_date: None,
+        });
+    }
+
+    for commitment in &summary.commitments {
+        let due = extract_due_date(commitment);
+        let (who, what) = parse_actor_prefix(commitment);
+        intents.push(markdown::Intent {
+            kind: markdown::IntentKind::Commitment,
+            what: what.trim_end_matches(')').trim().to_string(),
+            who,
+            status: "open".into(),
+            by_date: due,
+        });
+    }
+
+    intents
+}
+
 /// Try to extract a due date from action item text.
 /// Matches patterns like "by Friday", "by March 21", "(due 2026-03-21)".
 fn extract_due_date(text: &str) -> Option<String> {
@@ -565,6 +628,8 @@ mod tests {
                 "@sarah: Review competitor grid (due March 21)".into(),
                 "Unassigned task with no @".into(),
             ],
+            open_questions: vec![],
+            commitments: vec![],
         };
 
         let items = extract_action_items(&summary);
@@ -590,6 +655,8 @@ mod tests {
                 "Use REST over GraphQL for the new API".into(),
             ],
             action_items: vec![],
+            open_questions: vec![],
+            commitments: vec![],
         };
 
         let decisions = extract_decisions(&summary);
@@ -609,5 +676,30 @@ mod tests {
             Some("March 21".into())
         );
         assert_eq!(extract_due_date("Just do this thing"), None);
+    }
+
+    #[test]
+    fn extract_intents_builds_typed_entries() {
+        let summary = summarize::Summary {
+            text: String::new(),
+            key_points: vec![],
+            decisions: vec!["Use REST over GraphQL for the new API".into()],
+            action_items: vec!["@user: Send pricing doc by Friday".into()],
+            open_questions: vec!["@case: Do we grandfather current customers?".into()],
+            commitments: vec!["@sarah: Share revised pricing model by Tuesday".into()],
+        };
+
+        let intents = extract_intents(&summary);
+        assert_eq!(intents.len(), 4);
+        assert_eq!(intents[0].kind, markdown::IntentKind::ActionItem);
+        assert_eq!(intents[0].who.as_deref(), Some("mat"));
+        assert_eq!(intents[0].by_date.as_deref(), Some("Friday"));
+        assert_eq!(intents[1].kind, markdown::IntentKind::Decision);
+        assert_eq!(intents[1].status, "decided");
+        assert_eq!(intents[2].kind, markdown::IntentKind::OpenQuestion);
+        assert_eq!(intents[2].who.as_deref(), Some("case"));
+        assert_eq!(intents[3].kind, markdown::IntentKind::Commitment);
+        assert_eq!(intents[3].who.as_deref(), Some("sarah"));
+        assert_eq!(intents[3].by_date.as_deref(), Some("Tuesday"));
     }
 }

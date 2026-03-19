@@ -18,6 +18,8 @@ pub struct Summary {
     pub text: String,
     pub decisions: Vec<String>,
     pub action_items: Vec<String>,
+    pub open_questions: Vec<String>,
+    pub commitments: Vec<String>,
     pub key_points: Vec<String>,
 }
 
@@ -47,6 +49,8 @@ pub fn summarize(transcript: &str, config: &Config) -> Option<Summary> {
             tracing::info!(
                 decisions = summary.decisions.len(),
                 action_items = summary.action_items.len(),
+                open_questions = summary.open_questions.len(),
+                commitments = summary.commitments.len(),
                 key_points = summary.key_points.len(),
                 "summarization complete"
             );
@@ -86,6 +90,20 @@ pub fn format_summary(summary: &Summary) -> String {
         }
     }
 
+    if !summary.open_questions.is_empty() {
+        output.push_str("\n## Open Questions\n\n");
+        for question in &summary.open_questions {
+            output.push_str(&format!("- {}\n", question));
+        }
+    }
+
+    if !summary.commitments.is_empty() {
+        output.push_str("\n## Commitments\n\n");
+        for commitment in &summary.commitments {
+            output.push_str(&format!("- {}\n", commitment));
+        }
+    }
+
     output
 }
 
@@ -95,6 +113,8 @@ const SYSTEM_PROMPT: &str = r#"You are a meeting summarizer. Given a transcript,
 1. Key points (3-5 bullet points summarizing what was discussed)
 2. Decisions (any decisions that were made)
 3. Action items (tasks assigned to specific people, with deadlines if mentioned)
+4. Open questions (unresolved questions or unknowns that still need follow-up)
+5. Commitments (explicit promises, commitments, or owner statements made by someone)
 
 Respond in this exact format:
 
@@ -106,7 +126,13 @@ DECISIONS:
 - decision 1
 
 ACTION ITEMS:
-- @person: task description (by deadline if mentioned)"#;
+- @person: task description (by deadline if mentioned)
+
+OPEN QUESTIONS:
+- question 1
+
+COMMITMENTS:
+- @person: commitment description (by deadline if mentioned)"#;
 
 fn build_prompt(transcript: &str, chunk_max_tokens: usize) -> Vec<String> {
     // Rough token estimate: ~4 chars per token
@@ -139,6 +165,8 @@ fn parse_summary_response(response: &str) -> Summary {
     let mut key_points = Vec::new();
     let mut decisions = Vec::new();
     let mut action_items = Vec::new();
+    let mut open_questions = Vec::new();
+    let mut commitments = Vec::new();
     let mut current_section = "";
 
     for line in response.lines() {
@@ -153,6 +181,12 @@ fn parse_summary_response(response: &str) -> Summary {
         } else if trimmed.starts_with("ACTION ITEMS:") {
             current_section = "action_items";
             continue;
+        } else if trimmed.starts_with("OPEN QUESTIONS:") {
+            current_section = "open_questions";
+            continue;
+        } else if trimmed.starts_with("COMMITMENTS:") {
+            current_section = "commitments";
+            continue;
         }
 
         if let Some(item) = trimmed.strip_prefix("- ") {
@@ -160,6 +194,8 @@ fn parse_summary_response(response: &str) -> Summary {
                 "key_points" => key_points.push(item.to_string()),
                 "decisions" => decisions.push(item.to_string()),
                 "action_items" => action_items.push(item.to_string()),
+                "open_questions" => open_questions.push(item.to_string()),
+                "commitments" => commitments.push(item.to_string()),
                 _ => {}
             }
         }
@@ -173,6 +209,8 @@ fn parse_summary_response(response: &str) -> Summary {
         },
         decisions,
         action_items,
+        open_questions,
+        commitments,
         key_points,
     }
 }
@@ -365,12 +403,20 @@ DECISIONS:
 
 ACTION ITEMS:
 - @user: Send pricing doc by Friday
-- @case: Review competitor grid";
+- @case: Review competitor grid
+
+OPEN QUESTIONS:
+- Do we grandfather current customers?
+
+COMMITMENTS:
+- @sarah: Share revised pricing model by Tuesday";
 
         let summary = parse_summary_response(response);
         assert_eq!(summary.key_points.len(), 2);
         assert_eq!(summary.decisions.len(), 1);
         assert_eq!(summary.action_items.len(), 2);
+        assert_eq!(summary.open_questions.len(), 1);
+        assert_eq!(summary.commitments.len(), 1);
         assert!(summary.action_items[0].contains("@mat"));
     }
 
@@ -411,6 +457,8 @@ ACTION ITEMS:
             key_points: vec!["Point one".into(), "Point two".into()],
             decisions: vec!["Decision A".into()],
             action_items: vec!["@user: Do the thing".into()],
+            open_questions: vec!["Should we grandfather current customers?".into()],
+            commitments: vec!["@case: Share the rollout plan by Friday".into()],
         };
         let md = format_summary(&summary);
         assert!(md.contains("- Point one"));
@@ -418,6 +466,8 @@ ACTION ITEMS:
         assert!(md.contains("- [x] Decision A"));
         assert!(md.contains("## Action Items"));
         assert!(md.contains("- [ ] @user: Do the thing"));
+        assert!(md.contains("## Open Questions"));
+        assert!(md.contains("## Commitments"));
     }
 
     #[test]
