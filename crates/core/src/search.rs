@@ -1,6 +1,7 @@
 use crate::config::Config;
 use crate::error::SearchError;
 use crate::markdown::{extract_field, split_frontmatter, Frontmatter, IntentKind};
+use chrono::{DateTime, Local};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
@@ -35,6 +36,37 @@ pub struct IntentResult {
     pub who: Option<String>,
     pub status: String,
     pub by_date: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ReportEntry {
+    pub path: PathBuf,
+    pub title: String,
+    pub date: String,
+    pub what: String,
+    pub who: Option<String>,
+    pub by_date: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DecisionConflict {
+    pub topic: String,
+    pub latest: ReportEntry,
+    pub previous: Vec<ReportEntry>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct StaleCommitment {
+    pub kind: IntentKind,
+    pub entry: ReportEntry,
+    pub meetings_since: usize,
+    pub age_days: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ConsistencyReport {
+    pub decision_conflicts: Vec<DecisionConflict>,
+    pub stale_commitments: Vec<StaleCommitment>,
 }
 
 pub struct SearchFilters {
@@ -109,6 +141,145 @@ pub fn search_intents(
 
     results.sort_by(|a, b| b.date.cmp(&a.date));
     Ok(results)
+}
+
+pub fn consistency_report(
+    config: &Config,
+    owner: Option<&str>,
+    stale_after_days: i64,
+) -> Result<ConsistencyReport, SearchError> {
+    let dir = &config.output_dir;
+    if !dir.exists() {
+        return Err(SearchError::DirNotFound(dir.display().to_string()));
+    }
+
+    let mut parsed_frontmatters = Vec::new();
+    for entry in WalkDir::new(dir)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "md"))
+    {
+        let path = entry.path();
+        let content = match std::fs::read_to_string(path) {
+            Ok(content) => content,
+            Err(e) => {
+                tracing::warn!(path = %path.display(), error = %e, "skipping file in consistency report");
+                continue;
+            }
+        };
+
+        let (frontmatter_str, _) = split_frontmatter(&content);
+        if frontmatter_str.is_empty() {
+            continue;
+        }
+
+        match serde_yaml::from_str::<Frontmatter>(frontmatter_str) {
+            Ok(frontmatter) => parsed_frontmatters.push((path.to_path_buf(), frontmatter)),
+            Err(e) => {
+                tracing::warn!(path = %path.display(), error = %e, "skipping malformed frontmatter in consistency report");
+            }
+        }
+    }
+
+    parsed_frontmatters.sort_by(|a, b| a.1.date.cmp(&b.1.date));
+
+    let owner_lower = owner.map(|value| value.to_lowercase());
+    let now = Local::now();
+    let meeting_dates: Vec<DateTime<Local>> =
+        parsed_frontmatters.iter().map(|(_, fm)| fm.date).collect();
+
+    let mut decision_groups: std::collections::HashMap<String, Vec<ReportEntry>> =
+        std::collections::HashMap::new();
+    let mut stale_commitments = Vec::new();
+
+    for (path, frontmatter) in &parsed_frontmatters {
+        for decision in &frontmatter.decisions {
+            let topic = decision
+                .topic
+                .clone()
+                .unwrap_or_else(|| normalize_topic(&decision.text));
+            if topic.is_empty() {
+                continue;
+            }
+
+            decision_groups.entry(topic).or_default().push(ReportEntry {
+                path: path.clone(),
+                title: frontmatter.title.clone(),
+                date: frontmatter.date.to_rfc3339(),
+                what: decision.text.clone(),
+                who: None,
+                by_date: None,
+            });
+        }
+
+        for intent in &frontmatter.intents {
+            if !matches!(intent.kind, IntentKind::Commitment | IntentKind::ActionItem) {
+                continue;
+            }
+            if intent.status != "open" {
+                continue;
+            }
+
+            if let Some(ref owner_lower) = owner_lower {
+                let owner_match = intent
+                    .who
+                    .as_ref()
+                    .map(|who| who.to_lowercase().contains(owner_lower))
+                    .unwrap_or(false);
+                if !owner_match {
+                    continue;
+                }
+            }
+
+            let meetings_since = meeting_dates
+                .iter()
+                .filter(|date| **date > frontmatter.date)
+                .count();
+            let age_days = now.signed_duration_since(frontmatter.date).num_days();
+
+            if age_days >= stale_after_days || meetings_since >= 3 {
+                stale_commitments.push(StaleCommitment {
+                    kind: intent.kind,
+                    entry: ReportEntry {
+                        path: path.clone(),
+                        title: frontmatter.title.clone(),
+                        date: frontmatter.date.to_rfc3339(),
+                        what: intent.what.clone(),
+                        who: intent.who.clone(),
+                        by_date: intent.by_date.clone(),
+                    },
+                    meetings_since,
+                    age_days,
+                });
+            }
+        }
+    }
+
+    let mut decision_conflicts = Vec::new();
+    for (topic, mut entries) in decision_groups {
+        entries.sort_by(|a, b| a.date.cmp(&b.date));
+        let mut unique_values = std::collections::HashSet::new();
+        for entry in &entries {
+            unique_values.insert(entry.what.to_lowercase());
+        }
+
+        if unique_values.len() > 1 {
+            let latest = entries.pop().expect("entries not empty");
+            decision_conflicts.push(DecisionConflict {
+                topic,
+                latest,
+                previous: entries,
+            });
+        }
+    }
+
+    decision_conflicts.sort_by(|a, b| b.latest.date.cmp(&a.latest.date));
+    stale_commitments.sort_by(|a, b| b.entry.date.cmp(&a.entry.date));
+
+    Ok(ConsistencyReport {
+        decision_conflicts,
+        stale_commitments,
+    })
 }
 
 fn process_file(
@@ -371,6 +542,22 @@ fn extract_snippet(body: &str, query: &str) -> String {
     }
 }
 
+fn normalize_topic(text: &str) -> String {
+    let stopwords = [
+        "a", "an", "and", "as", "at", "by", "for", "from", "in", "of", "on", "or", "the", "to",
+        "with", "we", "should", "will", "be", "is", "are", "use", "using",
+    ];
+
+    text.split_whitespace()
+        .map(|word| word.trim_matches(|c: char| !c.is_alphanumeric()))
+        .filter(|word| !word.is_empty())
+        .filter(|word| !stopwords.contains(&word.to_lowercase().as_str()))
+        .take(4)
+        .map(|word| word.to_lowercase())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -551,5 +738,46 @@ mod tests {
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].kind, IntentKind::Commitment);
         assert_eq!(results[0].who.as_deref(), Some("sarah"));
+    }
+
+    #[test]
+    fn consistency_report_flags_conflicts_and_stale_commitments() {
+        let dir = TempDir::new().unwrap();
+        create_test_file(
+            dir.path(),
+            "2026-03-01-a.md",
+            "---\ntitle: Pricing Decision\ntype: meeting\ndate: 2026-03-01T12:00:00-07:00\nduration: 30m\nstatus: complete\ntags: []\nattendees: []\npeople: []\naction_items: []\ndecisions:\n  - text: Launch pricing at annual billing per month\n    topic: pricing\nintents:\n  - kind: commitment\n    what: Send pricing doc\n    who: case\n    status: open\n    by_date: March 8\n---\n\n## Transcript\n\nPricing discussion.\n",
+        );
+        create_test_file(
+            dir.path(),
+            "2026-03-12-b.md",
+            "---\ntitle: Pricing Revisit\ntype: meeting\ndate: 2026-03-12T12:00:00-07:00\nduration: 30m\nstatus: complete\ntags: []\nattendees: []\npeople: []\naction_items: []\ndecisions:\n  - text: Launch pricing at monthly billing per month\n    topic: pricing\nintents: []\n---\n\n## Transcript\n\nPricing changed.\n",
+        );
+        create_test_file(
+            dir.path(),
+            "2026-03-20-c.md",
+            "---\ntitle: Follow-up\ntype: meeting\ndate: 2026-03-20T12:00:00-07:00\nduration: 30m\nstatus: complete\ntags: []\nattendees: []\npeople: []\naction_items: []\ndecisions: []\nintents: []\n---\n\n## Transcript\n\nFollow-up.\n",
+        );
+        create_test_file(
+            dir.path(),
+            "2026-03-25-d.md",
+            "---\ntitle: Another Follow-up\ntype: meeting\ndate: 2026-03-25T12:00:00-07:00\nduration: 30m\nstatus: complete\ntags: []\nattendees: []\npeople: []\naction_items: []\ndecisions: []\nintents: []\n---\n\n## Transcript\n\nAnother follow-up.\n",
+        );
+
+        let config = Config {
+            output_dir: dir.path().to_path_buf(),
+            ..Config::default()
+        };
+
+        let report = consistency_report(&config, None, 7).unwrap();
+        assert_eq!(report.decision_conflicts.len(), 1);
+        assert_eq!(report.decision_conflicts[0].topic, "pricing");
+        assert_eq!(report.decision_conflicts[0].previous.len(), 1);
+        assert_eq!(report.stale_commitments.len(), 1);
+        assert_eq!(
+            report.stale_commitments[0].entry.who.as_deref(),
+            Some("case")
+        );
+        assert!(report.stale_commitments[0].meetings_since >= 3);
     }
 }

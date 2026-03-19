@@ -338,6 +338,69 @@ server.tool(
   }
 );
 
+// ── Tool: consistency_report ───────────────────────────────
+
+server.tool(
+  "consistency_report",
+  "Flag conflicting decisions and stale commitments across meetings using structured intent data.",
+  {
+    owner: z.string().optional().describe("Filter stale commitments by owner / person"),
+    stale_after_days: z
+      .number()
+      .optional()
+      .default(7)
+      .describe("Flag commitments this many days old or older"),
+  },
+  async ({ owner, stale_after_days }) => {
+    const args = ["consistency", "--stale-after-days", String(stale_after_days)];
+    if (owner) args.push("--owner", owner);
+
+    const { stdout, stderr } = await runMinutes(args);
+    const report = parseJsonOutput(stdout);
+
+    if (!report || typeof report !== "object") {
+      return { content: [{ type: "text" as const, text: stderr || stdout }] };
+    }
+
+    const decisionConflicts = Array.isArray(report.decision_conflicts)
+      ? report.decision_conflicts
+      : [];
+    const staleCommitments = Array.isArray(report.stale_commitments)
+      ? report.stale_commitments
+      : [];
+
+    if (decisionConflicts.length === 0 && staleCommitments.length === 0) {
+      return { content: [{ type: "text" as const, text: "No consistency issues found." }] };
+    }
+
+    const sections = [];
+    if (decisionConflicts.length > 0) {
+      sections.push(
+        "Decision conflicts:\n" +
+          decisionConflicts
+            .map(
+              (conflict: any) =>
+                `- ${conflict.topic}: latest "${conflict.latest.what}" (${conflict.latest.title})`
+            )
+            .join("\n")
+      );
+    }
+    if (staleCommitments.length > 0) {
+      sections.push(
+        "Stale commitments:\n" +
+          staleCommitments
+            .map(
+              (stale: any) =>
+                `- ${stale.kind}: ${stale.entry.what}${stale.entry.who ? ` (@${stale.entry.who})` : ""} — ${stale.age_days} days old`
+            )
+            .join("\n")
+      );
+    }
+
+    return { content: [{ type: "text" as const, text: sections.join("\n\n") }] };
+  }
+);
+
 // ── Tool: get_meeting ───────────────────────────────────────
 
 server.tool(

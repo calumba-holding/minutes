@@ -86,6 +86,17 @@ enum Commands {
         assignee: Option<String>,
     },
 
+    /// Flag conflicting decisions and stale commitments across meetings
+    Consistency {
+        /// Filter stale commitments by owner / person
+        #[arg(long)]
+        owner: Option<String>,
+
+        /// Flag commitments this many days old or older
+        #[arg(long, default_value = "7")]
+        stale_after_days: i64,
+    },
+
     /// List recent meetings and voice memos
     List {
         /// Maximum number of results
@@ -197,6 +208,10 @@ fn main() -> Result<()> {
             &config,
         ),
         Commands::Actions { assignee } => cmd_actions(assignee.as_deref(), &config),
+        Commands::Consistency {
+            owner,
+            stale_after_days,
+        } => cmd_consistency(owner.as_deref(), stale_after_days, &config),
         Commands::List {
             limit,
             content_type,
@@ -531,6 +546,49 @@ fn cmd_actions(assignee: Option<&str>, config: &Config) -> Result<()> {
 fn cmd_list(limit: usize, content_type: Option<String>, config: &Config) -> Result<()> {
     // List delegates to search with an empty query — DRY, no duplicated file walking
     cmd_search("", content_type, None, limit, false, None, None, config)
+}
+
+fn cmd_consistency(owner: Option<&str>, stale_after_days: i64, config: &Config) -> Result<()> {
+    let report = minutes_core::search::consistency_report(config, owner, stale_after_days)
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+    if report.decision_conflicts.is_empty() && report.stale_commitments.is_empty() {
+        eprintln!("No consistency issues found.");
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
+
+    if !report.decision_conflicts.is_empty() {
+        eprintln!("Decision conflicts ({}):", report.decision_conflicts.len());
+        for conflict in &report.decision_conflicts {
+            eprintln!("  topic: {}", conflict.topic);
+            eprintln!(
+                "  latest: {} — {}",
+                conflict.latest.title, conflict.latest.what
+            );
+            for previous in &conflict.previous {
+                eprintln!("  previous: {} — {}", previous.title, previous.what);
+            }
+            eprintln!("  {}", conflict.latest.path.display());
+        }
+    }
+
+    if !report.stale_commitments.is_empty() {
+        eprintln!("\nStale commitments ({}):", report.stale_commitments.len());
+        for stale in &report.stale_commitments {
+            let who = stale.entry.who.as_deref().unwrap_or("unassigned");
+            let due = stale.entry.by_date.as_deref().unwrap_or("no due date");
+            eprintln!(
+                "  {:?}: {} (@{}, {}, {} days old, {} meetings since)",
+                stale.kind, stale.entry.what, who, due, stale.age_days, stale.meetings_since
+            );
+            eprintln!("  from: {} — {}", stale.entry.date, stale.entry.title);
+            eprintln!("  {}", stale.entry.path.display());
+        }
+    }
+
+    println!("{}", serde_json::to_string_pretty(&report)?);
+    Ok(())
 }
 
 fn parse_intent_kind(kind: &str) -> Result<minutes_core::markdown::IntentKind> {
