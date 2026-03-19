@@ -73,6 +73,7 @@ That will:
 
 - run the same workflow
 - build the signed + notarized artifacts
+- generate a release-note draft from the previous tag to the new tag
 - attach the generated `.dmg` to the GitHub Release for that tag
 
 For preview builds, use a prerelease tag such as:
@@ -108,3 +109,5 @@ first and then run the same commands.
   complicating this first trusted pipeline.
 - Channel and rollback rules live in
   [docs/RELEASE-CHANNELS.md](/Users/silverbook/Sites/minutes/docs/RELEASE-CHANNELS.md).
+- Reproducible release-note generation lives in
+  [docs/RELEASE-NOTES.md](/Users/silverbook/Sites/minutes/docs/RELEASE-NOTES.md).

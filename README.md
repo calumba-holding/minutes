@@ -84,6 +84,8 @@ The full secrets contract and maintainer steps live in
 
 Stable vs preview channels and rollback expectations live in
 [docs/RELEASE-CHANNELS.md](/Users/silverbook/Sites/minutes/docs/RELEASE-CHANNELS.md).
+Reproducible release-note generation lives in
+[docs/RELEASE-NOTES.md](/Users/silverbook/Sites/minutes/docs/RELEASE-NOTES.md).
 
 ### Troubleshooting
 
