@@ -55,8 +55,9 @@ cli_file="$tmpdir/cli.txt"
 desktop_file="$tmpdir/desktop.txt"
 mcp_file="$tmpdir/mcp.txt"
 other_file="$tmpdir/other.txt"
+distribution_file="$tmpdir/distribution.txt"
 
-touch "$core_file" "$cli_file" "$desktop_file" "$mcp_file" "$other_file"
+touch "$core_file" "$cli_file" "$desktop_file" "$mcp_file" "$other_file" "$distribution_file"
 
 while IFS=$'\t' read -r sha subject; do
   [[ -z "$sha" ]] && continue
@@ -81,6 +82,10 @@ while IFS=$'\t' read -r sha subject; do
     echo "$line" >> "$core_file"
     matched=1
   fi
+  if grep -qE '^(\.github/workflows/release-macos\.yml|docs/RELEASE-|docs/AUTO-UPDATE-EVALUATION\.md|README\.md|BUILD-STATUS\.md)$' <<<"$paths"; then
+    echo "$line" >> "$distribution_file"
+    matched=1
+  fi
 
   if [[ "$matched" -eq 0 ]]; then
     echo "$line" >> "$other_file"
@@ -101,6 +106,7 @@ desktop_count="$(count_lines "$desktop_file")"
 mcp_count="$(count_lines "$mcp_file")"
 core_count="$(count_lines "$core_file")"
 other_count="$(count_lines "$other_file")"
+distribution_count="$(count_lines "$distribution_file")"
 
 if [[ "$channel" == "preview" ]]; then
   channel_sentence="Preview release intended for early adopters and maintainers."
@@ -136,12 +142,17 @@ if [[ "$mcp_count" -gt 0 ]]; then
   cat "$mcp_file"
   echo
 fi
+if [[ "$distribution_count" -gt 0 ]]; then
+  echo "### Distribution and release policy"
+  cat "$distribution_file"
+  echo
+fi
 if [[ "$other_count" -gt 0 ]]; then
   echo "### Other repo changes"
   cat "$other_file"
   echo
 fi
-if [[ "$core_count" -eq 0 && "$desktop_count" -eq 0 && "$cli_count" -eq 0 && "$mcp_count" -eq 0 && "$other_count" -eq 0 ]]; then
+if [[ "$core_count" -eq 0 && "$desktop_count" -eq 0 && "$cli_count" -eq 0 && "$mcp_count" -eq 0 && "$distribution_count" -eq 0 && "$other_count" -eq 0 ]]; then
   echo "- No commits found in this range."
   echo
 fi
@@ -157,10 +168,13 @@ fi
 if [[ "$mcp_count" -gt 0 ]]; then
   echo "- MCP / Claude / Codex users should care about this release."
 fi
+if [[ "$distribution_count" -gt 0 ]]; then
+  echo "- Desktop users and maintainers should care because install, release, or update behavior changed."
+fi
 if [[ "$core_count" -gt 0 && "$desktop_count" -eq 0 && "$cli_count" -eq 0 && "$mcp_count" -eq 0 ]]; then
   echo "- Users across multiple surfaces may care because the shared engine changed."
 fi
-if [[ "$core_count" -eq 0 && "$desktop_count" -eq 0 && "$cli_count" -eq 0 && "$mcp_count" -eq 0 ]]; then
+if [[ "$core_count" -eq 0 && "$desktop_count" -eq 0 && "$cli_count" -eq 0 && "$mcp_count" -eq 0 && "$distribution_count" -eq 0 ]]; then
   echo "- This range does not contain user-facing product changes."
 fi
 echo
@@ -181,6 +195,9 @@ if [[ "$mcp_count" -gt 0 ]]; then
   echo "- MCP: MCP or agent-integration changes are included in this release."
 else
   echo "- MCP: no direct MCP or agent-integration changes in this release."
+fi
+if [[ "$distribution_count" -gt 0 ]]; then
+  echo "- Distribution: install, signing, release-channel, or updater policy changed in this release."
 fi
 if [[ "$core_count" -gt 0 ]]; then
   echo "- Shared engine: core pipeline changes may affect more than one surface."
