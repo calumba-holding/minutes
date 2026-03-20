@@ -678,6 +678,4 @@ app.onhostcontextchanged = handleHostContext;
 app.connect().then(() => {
   const ctx = app.getHostContext();
   if (ctx) handleHostContext(ctx);
-  // Check recording status on connect
-  checkRecordingStatus();
 });
