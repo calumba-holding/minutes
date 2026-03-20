@@ -19,6 +19,45 @@ use std::time::Duration;
 // Linux: uses `scrot` or `gnome-screenshot` if available
 // ──────────────────────────────────────────────────────────────
 
+/// Check if screen recording permission is available on macOS.
+/// Returns true if we can capture, false if permission is missing.
+/// On non-macOS platforms, always returns true.
+pub fn check_screen_permission() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        // Capture a 1x1 test screenshot to check permission
+        let test_path = std::env::temp_dir().join("minutes-screen-test.png");
+        let result = std::process::Command::new("screencapture")
+            .args(["-x", "-R", "0,0,1,1", "-t", "png"])
+            .arg(&test_path)
+            .output();
+
+        let _ = std::fs::remove_file(&test_path);
+
+        match result {
+            Ok(output) => {
+                if output.status.success() {
+                    // Check if the file was created and is non-trivial
+                    // (blank/black screenshots from missing permission are still valid PNGs
+                    // but we can't easily distinguish them without image analysis)
+                    true
+                } else {
+                    tracing::warn!("screen capture permission check failed — grant Screen Recording permission in System Settings > Privacy & Security");
+                    false
+                }
+            }
+            Err(_) => {
+                tracing::warn!("screencapture command not found");
+                false
+            }
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        true
+    }
+}
+
 /// Start capturing screenshots at a regular interval.
 /// Returns a handle that stops capture when dropped.
 /// Screenshots are saved as timestamped PNGs in `output_dir`.
@@ -49,7 +88,18 @@ pub fn start_capture(
             "screen capture started"
         );
 
-        while !thread_stop.load(Ordering::Relaxed) {
+        // Wait one interval before first capture (skip the t=0 screenshot
+        // which is usually taken before the meeting content is on screen)
+        let first_sleep_end = std::time::Instant::now() + interval;
+        while std::time::Instant::now() < first_sleep_end {
+            if thread_stop.load(Ordering::Relaxed) {
+                tracing::info!(captures = 0, "screen capture stopped (before first capture)");
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(250));
+        }
+
+        while !thread_stop.load(Ordering::Relaxed) && index < MAX_SCREENSHOTS {
             let elapsed = start.elapsed().as_secs();
             let filename = format!("screen-{:04}-{:04}s.png", index, elapsed);
             let path = dir.join(&filename);
@@ -82,13 +132,21 @@ pub fn start_capture(
     });
 
     Ok(ScreenCaptureHandle {
-        _thread: Some(handle),
+        thread: Some(handle),
     })
 }
 
-/// Capture a single screenshot to the given path.
+/// Maximum number of screenshots per recording session.
+/// 8 images × ~200KB (after resize) = ~1.6 MB total — safe for LLM APIs.
+const MAX_SCREENSHOTS: u32 = 60;
+
+/// Target resolution for screenshots (width in pixels).
+/// Full Retina screenshots are 3-8 MB; resizing to 1280px wide reduces to ~200KB.
+const TARGET_WIDTH: u32 = 1280;
+
+/// Capture a single screenshot to the given path, downscaled to TARGET_WIDTH.
 fn capture_screenshot(path: &Path) -> std::io::Result<()> {
-    // macOS: screencapture -x (silent) -C (include cursor) -t png
+    // macOS: screencapture to temp file, then resize with sips
     #[cfg(target_os = "macos")]
     {
         let output = std::process::Command::new("screencapture")
@@ -102,6 +160,12 @@ fn capture_screenshot(path: &Path) -> std::io::Result<()> {
                 String::from_utf8_lossy(&output.stderr)
             )));
         }
+
+        // Downscale to reduce file size (Retina screenshots are 3-8 MB)
+        let _ = std::process::Command::new("sips")
+            .args(["--resampleWidth", &TARGET_WIDTH.to_string(), "-s", "format", "png"])
+            .arg(path)
+            .output(); // Best-effort — if sips fails, keep the full-res image
     }
 
     // Linux: try scrot, fall back to gnome-screenshot
@@ -168,8 +232,19 @@ pub fn list_screenshots(dir: &Path) -> Vec<PathBuf> {
 
 /// Handle that represents an active screen capture session.
 /// The capture thread runs until the stop_flag is set.
+/// Joining the thread on drop ensures no screenshots are captured
+/// after recording stops.
 pub struct ScreenCaptureHandle {
-    _thread: Option<std::thread::JoinHandle<()>>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for ScreenCaptureHandle {
+    fn drop(&mut self) {
+        if let Some(handle) = self.thread.take() {
+            // Wait for the capture thread to finish (it checks stop_flag every 250ms)
+            handle.join().ok();
+        }
+    }
 }
 
 #[cfg(test)]

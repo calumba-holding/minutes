@@ -4,5 +4,7 @@
 <dict>
     <key>NSMicrophoneUsageDescription</key>
     <string>Minutes needs microphone access to record meetings and voice memos.</string>
+    <key>NSScreenCaptureUsageDescription</key>
+    <string>Minutes can capture periodic screenshots during recordings to give the AI visual context about what was on screen. Enable in config: [screen_context] enabled = true</string>
 </dict>
 </plist>

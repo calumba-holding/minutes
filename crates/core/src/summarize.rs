@@ -24,8 +24,19 @@ pub struct Summary {
 }
 
 /// Summarize a transcript using the configured LLM engine.
+/// Optionally includes screen context images for vision-capable models.
 /// Returns None if summarization is disabled or fails gracefully.
 pub fn summarize(transcript: &str, config: &Config) -> Option<Summary> {
+    summarize_with_screens(transcript, &[], config)
+}
+
+/// Summarize a transcript with optional screen context screenshots.
+/// Screen images are sent as base64-encoded image content to vision-capable LLMs.
+pub fn summarize_with_screens(
+    transcript: &str,
+    screen_files: &[std::path::PathBuf],
+    config: &Config,
+) -> Option<Summary> {
     let engine = &config.summarization.engine;
 
     if engine == "none" {
@@ -35,9 +46,9 @@ pub fn summarize(transcript: &str, config: &Config) -> Option<Summary> {
     tracing::info!(engine = %engine, "running LLM summarization");
 
     let result = match engine.as_str() {
-        "claude" => summarize_with_claude(transcript, config),
-        "openai" => summarize_with_openai(transcript, config),
-        "ollama" => summarize_with_ollama(transcript, config),
+        "claude" => summarize_with_claude(transcript, screen_files, config),
+        "openai" => summarize_with_openai(transcript, screen_files, config),
+        "ollama" => summarize_with_ollama(transcript, config), // Ollama: text only
         other => {
             tracing::warn!(engine = %other, "unknown summarization engine, skipping");
             return None;
@@ -219,6 +230,7 @@ fn parse_summary_response(response: &str) -> Summary {
 
 fn summarize_with_claude(
     transcript: &str,
+    screen_files: &[std::path::PathBuf],
     config: &Config,
 ) -> Result<Summary, Box<dyn std::error::Error>> {
     let api_key = std::env::var("ANTHROPIC_API_KEY")
@@ -227,10 +239,31 @@ fn summarize_with_claude(
     let chunks = build_prompt(transcript, config.summarization.chunk_max_tokens);
     let mut all_summaries = Vec::new();
 
+    // Encode screen context images as base64 for the first chunk only
+    let screen_content = encode_screens_for_claude(screen_files);
+
     for (i, chunk) in chunks.iter().enumerate() {
         if chunks.len() > 1 {
             tracing::info!(chunk = i + 1, total = chunks.len(), "summarizing chunk");
         }
+
+        // Build multimodal content: images (first chunk only) + text
+        let mut content_blocks: Vec<serde_json::Value> = Vec::new();
+
+        // Include screen context images in the first chunk
+        if i == 0 && !screen_content.is_empty() {
+            tracing::info!(images = screen_content.len(), "sending screen context to Claude");
+            content_blocks.extend(screen_content.clone());
+            content_blocks.push(serde_json::json!({
+                "type": "text",
+                "text": "The images above show what was on screen during this meeting. Use them for context when speakers reference visual content.\n\n"
+            }));
+        }
+
+        content_blocks.push(serde_json::json!({
+            "type": "text",
+            "text": format!("Summarize this transcript:\n\n{}", chunk)
+        }));
 
         let body = serde_json::json!({
             "model": "claude-sonnet-4-20250514",
@@ -238,7 +271,7 @@ fn summarize_with_claude(
             "system": SYSTEM_PROMPT,
             "messages": [{
                 "role": "user",
-                "content": format!("Summarize this transcript:\n\n{}", chunk)
+                "content": content_blocks
             }]
         });
 
@@ -299,6 +332,7 @@ fn extract_claude_text(response: &serde_json::Value) -> Result<String, Box<dyn s
 
 fn summarize_with_openai(
     transcript: &str,
+    screen_files: &[std::path::PathBuf],
     config: &Config,
 ) -> Result<Summary, Box<dyn std::error::Error>> {
     let api_key = std::env::var("OPENAI_API_KEY")
@@ -307,12 +341,34 @@ fn summarize_with_openai(
     let chunks = build_prompt(transcript, config.summarization.chunk_max_tokens);
     let mut all_text = String::new();
 
-    for chunk in &chunks {
+    let screen_content = encode_screens_for_openai(screen_files);
+
+    for (i, chunk) in chunks.iter().enumerate() {
+        // Build multimodal content for OpenAI
+        let mut content_parts: Vec<serde_json::Value> = Vec::new();
+
+        if i == 0 && !screen_content.is_empty() {
+            tracing::info!(images = screen_content.len(), "sending screen context to OpenAI");
+            content_parts.extend(screen_content.clone());
+            content_parts.push(serde_json::json!({
+                "type": "text",
+                "text": "The images above show what was on screen during this meeting. Use them for context.\n\n"
+            }));
+        }
+
+        content_parts.push(serde_json::json!({
+            "type": "text",
+            "text": format!("Summarize this transcript:\n\n{}", chunk)
+        }));
+
+        // Use gpt-4o (vision-capable) when we have images, gpt-4o-mini otherwise
+        let model = if i == 0 && !screen_content.is_empty() { "gpt-4o" } else { "gpt-4o-mini" };
+
         let body = serde_json::json!({
-            "model": "gpt-4o-mini",
+            "model": model,
             "messages": [
                 { "role": "system", "content": SYSTEM_PROMPT },
-                { "role": "user", "content": format!("Summarize this transcript:\n\n{}", chunk) }
+                { "role": "user", "content": content_parts }
             ],
             "max_tokens": 1024,
         });
@@ -385,6 +441,70 @@ fn http_post(
     }
 
     Ok(response)
+}
+
+// ── Screen context image encoding ────────────────────────────
+// Reads PNG files, base64-encodes them, and formats for each LLM API.
+// Limits to MAX_SCREEN_IMAGES to avoid blowing API token limits.
+
+const MAX_SCREEN_IMAGES: usize = 8;
+
+fn read_and_encode_images(
+    screen_files: &[std::path::PathBuf],
+) -> Vec<(String, String)> {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+
+    screen_files
+        .iter()
+        .take(MAX_SCREEN_IMAGES) // Limit to avoid API token limits
+        .filter_map(|path| {
+            std::fs::read(path).ok().map(|bytes| {
+                let b64 = STANDARD.encode(&bytes);
+                let name = path.file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("screenshot.png")
+                    .to_string();
+                (name, b64)
+            })
+        })
+        .collect()
+}
+
+/// Encode screenshots as Claude API image content blocks.
+fn encode_screens_for_claude(
+    screen_files: &[std::path::PathBuf],
+) -> Vec<serde_json::Value> {
+    read_and_encode_images(screen_files)
+        .into_iter()
+        .map(|(_name, b64)| {
+            serde_json::json!({
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": "image/png",
+                    "data": b64
+                }
+            })
+        })
+        .collect()
+}
+
+/// Encode screenshots as OpenAI API image_url content blocks.
+fn encode_screens_for_openai(
+    screen_files: &[std::path::PathBuf],
+) -> Vec<serde_json::Value> {
+    read_and_encode_images(screen_files)
+        .into_iter()
+        .map(|(_name, b64)| {
+            serde_json::json!({
+                "type": "image_url",
+                "image_url": {
+                    "url": format!("data:image/png;base64,{}", b64),
+                    "detail": "low"  // Use low detail to reduce token cost
+                }
+            })
+        })
+        .collect()
 }
 
 #[cfg(test)]

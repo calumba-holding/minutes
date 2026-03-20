@@ -159,33 +159,19 @@ where
     let summary: Option<String> = if config.summarization.engine != "none" {
         on_progress(PipelineStage::Summarizing);
         tracing::info!(step = "summarize", "generating summary");
-        let mut context_parts = Vec::new();
 
-        if let Some(ref n) = user_notes {
-            context_parts.push(format!(
-                "USER NOTES (these moments were marked as important — weight them heavily):\n{}",
-                n
-            ));
-        }
-
-        if !screen_files.is_empty() {
-            context_parts.push(format!(
-                "SCREEN CONTEXT: {} screenshots were captured during this recording. \
-                 They are available at {} for visual context about what was on screen \
-                 during the meeting. Reference these when the speaker says things like \
-                 'look at this', 'that number', or 'what's on the screen'.",
-                screen_files.len(),
-                screen_dir.display()
-            ));
-        }
-
-        let transcript_with_context = if context_parts.is_empty() {
-            transcript.clone()
+        // Build transcript with user notes as context
+        let transcript_with_notes = if let Some(ref n) = user_notes {
+            format!(
+                "USER NOTES (these moments were marked as important — weight them heavily):\n{}\n\nTRANSCRIPT:\n{}",
+                n, transcript
+            )
         } else {
-            format!("{}\n\nTRANSCRIPT:\n{}", context_parts.join("\n\n"), transcript)
+            transcript.clone()
         };
-        summarize::summarize(&transcript_with_context, config).map(|s| {
-            // Extract structured data from the summary
+
+        // Send screenshots as actual images to vision-capable LLMs
+        summarize::summarize_with_screens(&transcript_with_notes, &screen_files, config).map(|s| {
             structured_actions = extract_action_items(&s);
             structured_decisions = extract_decisions(&s);
             structured_intents = extract_intents(&s);
@@ -194,6 +180,13 @@ where
     } else {
         None
     };
+
+    // Clean up screen captures (runs regardless of summarization setting — fixes race)
+    if !screen_files.is_empty() && !config.screen_context.keep_after_summary {
+        if std::fs::remove_dir_all(&screen_dir).is_ok() {
+            tracing::info!(dir = %screen_dir.display(), "screen captures cleaned up");
+        }
+    }
 
     // Step 4: Write markdown (always)
     on_progress(PipelineStage::Saving);
@@ -262,13 +255,6 @@ where
         write_ms,
         serde_json::json!({"output": result.path.display().to_string(), "words": result.word_count}),
     );
-
-    // Clean up screen captures if configured
-    if !screen_files.is_empty() && !config.screen_context.keep_after_summary {
-        if std::fs::remove_dir_all(&screen_dir).is_ok() {
-            tracing::info!(dir = %screen_dir.display(), "screen captures cleaned up");
-        }
-    }
 
     let elapsed = start.elapsed();
     logging::log_step(

@@ -238,21 +238,26 @@ pub fn record_to_wav(
 
     tracing::info!("audio capture started");
 
-    // Start screen context capture if enabled
+    // Start screen context capture if enabled (with permission check)
     let _screen_handle = if config.screen_context.enabled {
-        let screen_dir = crate::screen::screens_dir_for(output_path);
-        match crate::screen::start_capture(
-            &screen_dir,
-            std::time::Duration::from_secs(config.screen_context.interval_secs),
-            Arc::clone(&stop_flag),
-        ) {
-            Ok(handle) => {
-                eprintln!("[minutes] Screen context capture enabled (every {}s)", config.screen_context.interval_secs);
-                Some(handle)
-            }
-            Err(e) => {
-                tracing::warn!("screen capture init failed: {} — continuing without screen context", e);
-                None
+        if !crate::screen::check_screen_permission() {
+            eprintln!("[minutes] Screen context disabled — grant Screen Recording permission in System Settings > Privacy & Security");
+            None
+        } else {
+            let screen_dir = crate::screen::screens_dir_for(output_path);
+            match crate::screen::start_capture(
+                &screen_dir,
+                std::time::Duration::from_secs(config.screen_context.interval_secs),
+                Arc::clone(&stop_flag),
+            ) {
+                Ok(handle) => {
+                    eprintln!("[minutes] Screen context capture enabled (every {}s)", config.screen_context.interval_secs);
+                    Some(handle)
+                }
+                Err(e) => {
+                    tracing::warn!("screen capture init failed: {} — continuing without screen context", e);
+                    None
+                }
             }
         }
     } else {
