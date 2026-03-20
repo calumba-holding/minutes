@@ -116,42 +116,42 @@ const alerts = [];
 
 // 2a. Check for decision conflicts
 try {
-  // Extract decisions from the new meeting's frontmatter
-  const decisionsMatch = meetingContent.match(
-    /^decisions:\s*\n((?:\s+-\s+.*\n?)*)/m
-  );
-  if (decisionsMatch) {
-    const topicsInMeeting = [];
-    const topicMatches = decisionsMatch[1].matchAll(/topic:\s*(.+)/g);
+  // Extract decisions from the meeting's frontmatter.
+  // Look for topic: fields anywhere in the decisions block.
+  // Handle both top-level and indented `decisions:` in YAML.
+  const topicsInMeeting = [];
+  const frontmatterEnd = meetingContent.indexOf("\n---", 3);
+  if (frontmatterEnd > 0) {
+    const frontmatter = meetingContent.slice(0, frontmatterEnd);
+    // Find all topic: values in the frontmatter (regardless of nesting)
+    const topicMatches = frontmatter.matchAll(/topic:\s*(.+)/g);
     for (const m of topicMatches) {
       topicsInMeeting.push(m[1].trim());
     }
+  }
 
-    // For each topic, search for prior decisions
-    for (const topic of topicsInMeeting.slice(0, 3)) {
-      // Limit to 3 topics
-      try {
-        const searchResult = execFileSync(
-          "minutes",
-          ["search", topic, "--limit", "5"],
-          {
-            encoding: "utf-8",
-            timeout: 5000,
-          }
-        );
-
-        // Parse JSON results and check for conflicting decisions
-        const results = JSON.parse(searchResult);
-        const priorMeetings = results.filter((r) => r.path !== meetingPath);
-
-        if (priorMeetings.length > 0) {
-          alerts.push(
-            `Decision on "${topic}" — ${priorMeetings.length} prior meeting(s) also discussed this. Run /minutes debrief to check for conflicts.`
-          );
+  // For each topic, search for prior decisions
+  for (const topic of topicsInMeeting.slice(0, 3)) {
+    try {
+      const searchResult = execFileSync(
+        "minutes",
+        ["search", topic, "--limit", "5"],
+        {
+          encoding: "utf-8",
+          timeout: 5000,
         }
-      } catch {
-        // Search timed out or failed — skip this topic
+      );
+
+      const results = JSON.parse(searchResult);
+      const priorMeetings = results.filter((r) => r.path !== meetingPath);
+
+      if (priorMeetings.length > 0) {
+        alerts.push(
+          `Decision on "${topic}" — ${priorMeetings.length} prior meeting(s) also discussed this. Run /minutes debrief to check for conflicts.`
+        );
       }
+    } catch (searchErr) {
+      logError(`decision-search-${topic}`, searchErr);
     }
   }
 } catch (err) {

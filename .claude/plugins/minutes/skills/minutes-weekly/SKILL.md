@@ -15,11 +15,12 @@ This is a synthesis skill, not a command wrapper. It reads across all meetings, 
 ### Phase 1: Gather this week's recordings
 
 ```bash
-minutes search "$(date -v-7d +%Y-%m-%d)" --limit 50
 minutes list --limit 50
 ```
 
-Filter to recordings from the last 7 days. Read each one with `Read` to get full content.
+Filter to recordings from the last 7 days by checking the `date` field in each result's frontmatter. Do NOT use `minutes search` with a date string as the query — that searches file content, not dates.
+
+For each recording from the past 7 days, read the full file with `Read` to get content.
 
 **If zero recordings this week:**
 Say: "No recordings found for the past 7 days. Nothing to synthesize."

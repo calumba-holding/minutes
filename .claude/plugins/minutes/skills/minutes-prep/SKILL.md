@@ -20,13 +20,12 @@ Before asking who the user is meeting with, check if upcoming meetings are avail
 If `mcp__claude_ai_Google_Calendar__gcal_list_events` is available, query today's remaining events:
 ```
 gcal_list_events(
-  timeMin: "<now ISO>",
-  timeMax: "<end of day ISO>",
-  timeZone: "America/Los_Angeles",
+  timeMin: "<now ISO, e.g. 2026-03-19T14:00:00>",
+  timeMax: "<end of day, e.g. 2026-03-19T23:59:59>",
   condenseEventDetails: false
 )
 ```
-This returns attendees, event titles, and times. Parse the results to find the next upcoming meeting with other people (skip all-day events and events with no attendees).
+Do NOT hardcode a timezone — omit the `timeZone` parameter so the MCP uses the user's calendar default. This returns attendees, event titles, and times. Parse the results to find the next upcoming meeting with other people (skip all-day events and events with no attendees).
 
 **2. `gog` CLI** (if installed):
 ```bash

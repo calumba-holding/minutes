@@ -6,10 +6,11 @@
  * When a Claude Code session starts, check if the user has a meeting
  * in the next 60 minutes. If so, nudge them to run /minutes prep.
  *
- * This hook is lightweight — it exits quickly if no calendar source
- * is available. It uses the Google Calendar MCP tool availability as
- * a signal, but since hooks can't call MCP tools directly, it outputs
- * additionalContext that tells Claude to check the calendar.
+ * Guards against being annoying:
+ * - Only fires on startup (not resume/compact/clear)
+ * - Only fires if the user has used /minutes prep before (~/.minutes/preps/ exists)
+ * - Only fires during business hours (8am-6pm, weekdays)
+ * - Can be disabled via ~/.config/minutes/config.toml: [reminders] enabled = false
  *
  * Hook event: SessionStart
  * Matcher: startup
@@ -25,17 +26,33 @@ const event = input.session_event || input.event || "";
 
 if (event !== "startup") process.exit(0);
 
-// Check if the user has any prep infrastructure set up
-// (i.e., they've used /minutes prep before)
+// Guard 1: Only nudge if the user has actually used /minutes prep before
 const prepsDir = join(homedir(), ".minutes", "preps");
-const meetingsDir = join(homedir(), "meetings");
+if (!existsSync(prepsDir)) process.exit(0);
 
-// Only nudge if the user has meeting files (active Minutes user)
-if (!existsSync(meetingsDir)) process.exit(0);
+// Guard 2: Only fire during business hours (8am-6pm, weekdays)
+const now = new Date();
+const hour = now.getHours();
+const day = now.getDay(); // 0=Sun, 6=Sat
+if (day === 0 || day === 6 || hour < 8 || hour >= 18) process.exit(0);
+
+// Guard 3: Check config for opt-out
+const configPath = join(homedir(), ".config", "minutes", "config.toml");
+if (existsSync(configPath)) {
+  try {
+    const config = readFileSync(configPath, "utf-8");
+    // Simple TOML check — look for reminders.enabled = false
+    if (config.includes("enabled = false") && config.includes("[reminders]")) {
+      process.exit(0);
+    }
+  } catch {
+    // Config unreadable — continue
+  }
+}
 
 // Output a reminder for Claude to check the calendar
 const output = {
-  additionalContext: `Meeting reminder check: The user has Minutes installed with meeting history at ~/meetings/. If a Google Calendar MCP tool is available (gcal_list_events), check if the user has a meeting in the next 60 minutes. If they do, briefly mention it: "You have [meeting] in [N] minutes. Run /minutes prep to go in prepared." Keep it to one line — don't be pushy. If no calendar tool is available, skip silently.`,
+  additionalContext: `Meeting reminder check: The user is an active Minutes user (has used /minutes prep before). If a Google Calendar MCP tool is available (gcal_list_events), check if the user has a meeting in the next 60 minutes. If they do, briefly mention it: "You have [meeting] in [N] minutes. Run /minutes prep to go in prepared." Keep it to one line — don't be pushy. If no calendar tool is available, skip silently. Do NOT mention this check if there are no upcoming meetings.`,
 };
 
 console.log(JSON.stringify(output));
