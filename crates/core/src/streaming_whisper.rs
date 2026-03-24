@@ -1,4 +1,4 @@
-use whisper_rs::{FullParams, SamplingStrategy, WhisperContext};
+use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperState};
 
 // ──────────────────────────────────────────────────────────────
 // Streaming whisper transcription — progressive text output.
@@ -67,6 +67,8 @@ pub struct StreamingWhisper {
     n_threads: i32,
     /// Language hint (None = auto-detect).
     language: Option<String>,
+    /// Whether we've created a state before (suppress init noise on subsequent calls).
+    has_created_state: bool,
 }
 
 impl StreamingWhisper {
@@ -78,6 +80,7 @@ impl StreamingWhisper {
             last_partial: String::new(),
             n_threads: num_cpus(),
             language,
+            has_created_state: false,
         }
     }
 
@@ -121,7 +124,16 @@ impl StreamingWhisper {
 
     /// Run whisper on the full accumulated buffer.
     fn transcribe(&mut self, ctx: &WhisperContext, is_final: bool) -> Option<StreamingResult> {
-        let mut state = ctx.create_state().ok()?;
+        // Suppress whisper's noisy C-level stderr output on subsequent state creations.
+        // The first call prints GPU/backend info (useful); subsequent calls repeat it (noise).
+        let mut state = if self.has_created_state {
+            // Redirect stderr to /dev/null during state creation
+            let state = suppress_stderr(|| ctx.create_state().ok());
+            state?
+        } else {
+            self.has_created_state = true;
+            ctx.create_state().ok()?
+        };
 
         let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
         params.set_n_threads(self.n_threads);
@@ -184,6 +196,30 @@ impl StreamingWhisper {
             duration_secs,
         })
     }
+}
+
+/// Temporarily suppress stderr (whisper C code prints noisy init logs).
+fn suppress_stderr<T>(f: impl FnOnce() -> T) -> T {
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
+        let stderr_fd = std::io::stderr().as_raw_fd();
+        let saved = unsafe { libc::dup(stderr_fd) };
+        if saved >= 0 {
+            let devnull = std::fs::OpenOptions::new()
+                .write(true)
+                .open("/dev/null")
+                .ok();
+            if let Some(ref dn) = devnull {
+                unsafe { libc::dup2(dn.as_raw_fd(), stderr_fd) };
+            }
+            let result = f();
+            unsafe { libc::dup2(saved, stderr_fd) };
+            unsafe { libc::close(saved) };
+            return result;
+        }
+    }
+    f()
 }
 
 fn num_cpus() -> i32 {

@@ -30,8 +30,9 @@ mkdir -p "$APP_RESOURCES"
 cp -f target/release/calendar-events "$APP_RESOURCES/calendar-events"
 echo "  Embedded in $APP_RESOURCES/"
 
-echo "=== Installing CLI ==="
+echo "=== Signing + Installing CLI ==="
 mkdir -p ~/.local/bin
+codesign -s - -f target/release/minutes 2>/dev/null || true
 cp -f target/release/minutes ~/.local/bin/minutes && echo "  Installed to ~/.local/bin/"
 # Also try homebrew cellar if it exists
 CELLAR="/opt/homebrew/Cellar/minutes/0.1.0/bin"
