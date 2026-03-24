@@ -98,19 +98,19 @@ export default function Home() {
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
           {[
             {
+              icon: "cpu",
+              title: "AI agents",
+              desc: "10 MCP tools. 7 resources. Structured intents in YAML. Decision consistency tracking. People profiles. Any agent that speaks MCP can use Minutes as its memory layer.",
+            },
+            {
               icon: "terminal",
               title: "Developers",
               desc: "15 CLI commands. 136 tests. Rust engine, single binary, MIT license. Homebrew, cross-platform CI. TypeScript SDK for agent developers.",
             },
             {
               icon: "mic",
-              title: "Knowledge workers",
+              title: "Everyone else",
               desc: "Menu bar app with one-click recording. Calendar integration suggests recording before meetings. Voice memo pipeline from iPhone. Obsidian vault sync.",
-            },
-            {
-              icon: "cpu",
-              title: "AI agents",
-              desc: "10 MCP tools. 7 resources. Structured intents in YAML. Decision consistency tracking. People profiles. Any agent that speaks MCP can use Minutes as its memory layer.",
             },
           ].map((card) => (
             <div
@@ -147,7 +147,7 @@ export default function Home() {
             ["Structured extraction", "Action items, decisions, and commitments as queryable YAML, not buried in prose."],
             ["Cross-meeting intelligence", "Search across all meetings. Build people profiles from every conversation."],
             ["Voice memo pipeline", "iPhone Voice Memos → iCloud → auto-transcribe on Mac. Ideas while walking, searchable by afternoon."],
-            ["Desktop app", "Tauri v2 menu bar app. One-click recording, dictation hotkey, calendar integration. macOS and Windows."],
+            ["Desktop app", "Tauri v2 menu bar app. One-click recording, dictation hotkey, calendar integration. macOS today, Windows in progress."],
             ["Claude-native", "10 MCP tools for Claude Desktop, Cowork, Dispatch. Claude Code plugin with 12 skills. No API keys."],
             ["Any LLM", "Ollama for local. OpenAI if you prefer. Or skip summarization — the transcript is the artifact."],
             ["Markdown is the truth", "Every meeting saves as markdown with YAML frontmatter. Works with Obsidian, grep, QMD, or anything."],
