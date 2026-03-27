@@ -346,6 +346,24 @@ enum Commands {
         json: bool,
     },
 
+    /// Start a live transcript session (real-time meeting transcription)
+    Live,
+
+    /// Read the live transcript (delta reads from an active or recent session)
+    Transcript {
+        /// Lines since line number N, or duration like "5m", "30s"
+        #[arg(long)]
+        since: Option<String>,
+
+        /// Show session status only
+        #[arg(long)]
+        status: bool,
+
+        /// Output format: text or json
+        #[arg(long, default_value = "json", value_parser = ["text", "json"])]
+        format: String,
+    },
+
     /// Confirm or correct speaker attributions for a meeting
     Confirm {
         /// Path to the meeting markdown file
@@ -533,6 +551,12 @@ fn main() -> Result<()> {
             save_voice,
             &config,
         ),
+        Commands::Live => cmd_live(&config),
+        Commands::Transcript {
+            since,
+            status,
+            format,
+        } => cmd_transcript(since.as_deref(), status, &format),
     }
 }
 
@@ -596,6 +620,15 @@ fn live_stage_label(
         (minutes_core::pipeline::PipelineStage::Saving, CaptureMode::Dictation) => {
             "Saving dictation"
         }
+        (minutes_core::pipeline::PipelineStage::Transcribing, CaptureMode::LiveTranscript) => {
+            "Transcribing live session"
+        }
+        (minutes_core::pipeline::PipelineStage::Summarizing, CaptureMode::LiveTranscript) => {
+            "Generating live session summary"
+        }
+        (minutes_core::pipeline::PipelineStage::Saving, CaptureMode::LiveTranscript) => {
+            "Saving live transcript"
+        }
     }
 }
 
@@ -633,6 +666,9 @@ fn cmd_record(
         }
         CaptureMode::Dictation => {
             eprintln!("Use `minutes dictate` for dictation mode.");
+        }
+        CaptureMode::LiveTranscript => {
+            eprintln!("Use `minutes live` for live transcript mode.");
         }
     }
 
@@ -763,8 +799,41 @@ fn cmd_stop(_config: &Config) -> Result<()> {
             Ok(())
         }
         Ok(None) => {
-            eprintln!("No recording in progress.");
-            Ok(())
+            // No batch recording — check for live transcript session
+            let lt_pid_path = minutes_core::pid::live_transcript_pid_path();
+            match minutes_core::pid::check_pid_file(&lt_pid_path) {
+                Ok(Some(pid)) => {
+                    eprintln!("Stopping live transcript (PID {})...", pid);
+                    minutes_core::pid::write_stop_sentinel()
+                        .map_err(|e| anyhow::anyhow!("failed to write stop sentinel: {}", e))?;
+                    #[cfg(unix)]
+                    {
+                        let rc = unsafe { libc::kill(pid as i32, libc::SIGTERM) };
+                        if rc != 0 {
+                            tracing::warn!("SIGTERM failed for live transcript PID {}", pid);
+                        }
+                    }
+                    // Poll for PID removal
+                    let start = std::time::Instant::now();
+                    eprint!("Finalizing live transcript");
+                    while lt_pid_path.exists()
+                        && start.elapsed() < std::time::Duration::from_secs(30)
+                    {
+                        std::thread::sleep(std::time::Duration::from_millis(500));
+                        eprint!(".");
+                    }
+                    eprintln!();
+                    if lt_pid_path.exists() {
+                        anyhow::bail!("live transcript process did not stop within 30 seconds");
+                    }
+                    eprintln!("Live transcript stopped.");
+                    Ok(())
+                }
+                _ => {
+                    eprintln!("No recording or live transcript in progress.");
+                    Ok(())
+                }
+            }
         }
         Err(e) => Err(anyhow::anyhow!("{}", e)),
     }
@@ -3416,6 +3485,107 @@ fn cmd_confirm(
         confirmed_count,
         frontmatter.speaker_map.len()
     );
+
+    Ok(())
+}
+
+fn cmd_live(config: &Config) -> Result<()> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    eprintln!("Starting live transcript session...");
+    eprintln!("Press Ctrl-C or run `minutes stop` to end.\n");
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_clone = Arc::clone(&stop);
+
+    // Handle Ctrl-C
+    ctrlc::set_handler(move || {
+        stop_clone.store(true, Ordering::Relaxed);
+    })
+    .ok();
+
+    // No sentinel watcher needed — run_inner already polls check_and_clear_sentinel
+    // directly in its main loop, avoiding the thread-join and double-consume race.
+    match minutes_core::live_transcript::run(stop, config) {
+        Ok((lines, duration, path)) => {
+            eprintln!("\nLive transcript complete:");
+            eprintln!("  {} utterances in {:.0}s", lines, duration);
+            eprintln!("  Saved to: {}", path.display());
+            Ok(())
+        }
+        Err(e) => {
+            eprintln!("Live transcript error: {}", e);
+            Err(e.into())
+        }
+    }
+}
+
+fn cmd_transcript(since: Option<&str>, status: bool, format: &str) -> Result<()> {
+    if status {
+        let s = minutes_core::live_transcript::session_status();
+        if format == "json" {
+            println!("{}", serde_json::to_string_pretty(&s)?);
+        } else {
+            if s.active {
+                eprintln!("Live transcript: ACTIVE (PID: {})", s.pid.unwrap_or(0));
+            } else {
+                eprintln!("Live transcript: inactive");
+            }
+            eprintln!("  Lines: {}", s.line_count);
+            eprintln!("  Duration: {:.0}s", s.duration_secs);
+            if let Some(ref p) = s.jsonl_path {
+                eprintln!("  File: {}", p);
+            }
+        }
+        return Ok(());
+    }
+
+    let lines = match since {
+        Some(s) if s.ends_with('m') || s.ends_with('s') => {
+            // Duration-based: "5m" or "30s"
+            let (num_str, unit) = s.split_at(s.len() - 1);
+            let num: u64 = num_str
+                .parse()
+                .map_err(|_| anyhow::anyhow!("invalid duration: {}", s))?;
+            let ms = match unit {
+                "m" => num
+                    .checked_mul(60_000)
+                    .ok_or_else(|| anyhow::anyhow!("duration too large: {}", s))?,
+                "s" => num
+                    .checked_mul(1000)
+                    .ok_or_else(|| anyhow::anyhow!("duration too large: {}", s))?,
+                _ => anyhow::bail!("invalid duration unit: {}", unit),
+            };
+            minutes_core::live_transcript::read_since_duration(ms)?
+        }
+        Some(s) => {
+            // Line number
+            let n: usize = s.parse().map_err(|_| {
+                anyhow::anyhow!(
+                    "invalid --since value: '{}'. Use a line number (42) or duration (5m, 30s)",
+                    s
+                )
+            })?;
+            minutes_core::live_transcript::read_since_line(n)?
+        }
+        None => {
+            // All lines
+            minutes_core::live_transcript::read_since_line(0)?
+        }
+    };
+
+    if format == "json" {
+        for line in &lines {
+            println!("{}", serde_json::to_string(line)?);
+        }
+    } else {
+        for line in &lines {
+            let ts = line.ts.format("%H:%M:%S");
+            let speaker = line.speaker.as_deref().unwrap_or("?");
+            println!("[{}] [{}] {}", ts, speaker, line.text);
+        }
+    }
 
     Ok(())
 }

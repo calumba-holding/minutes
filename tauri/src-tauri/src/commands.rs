@@ -410,6 +410,7 @@ fn stage_label(stage: minutes_core::pipeline::PipelineStage, mode: CaptureMode) 
         (minutes_core::pipeline::PipelineStage::Saving, CaptureMode::Dictation) => {
             "Saving dictation"
         }
+        (_, CaptureMode::LiveTranscript) => "Processing live transcript",
     }
 }
 
@@ -1185,6 +1186,7 @@ pub fn start_recording(
                             CaptureMode::Meeting => "Saved meeting markdown",
                             CaptureMode::QuickThought => "Saved quick thought memo",
                             CaptureMode::Dictation => "Saved dictation",
+                            CaptureMode::LiveTranscript => "Saved live transcript",
                         };
                         let notice = OutputNotice {
                             kind: "saved".into(),
@@ -1216,6 +1218,9 @@ pub fn start_recording(
                                 }
                                 CaptureMode::Dictation => {
                                     "Processing failed, but the raw dictation capture was preserved."
+                                }
+                                CaptureMode::LiveTranscript => {
+                                    "Processing failed, but the raw live transcript capture was preserved."
                                 }
                             };
                             let notice = OutputNotice {
@@ -1258,6 +1263,9 @@ pub fn start_recording(
                     }
                     CaptureMode::Dictation => {
                         "Dictation failed, but the audio was preserved."
+                    }
+                    CaptureMode::LiveTranscript => {
+                        "Live transcript failed, but the audio was preserved."
                     }
                 };
                 let notice = OutputNotice {

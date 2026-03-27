@@ -630,6 +630,49 @@ pub fn resolve_model_path_for_dictation(config: &Config) -> Result<PathBuf, Tran
     )))
 }
 
+/// Resolve a whisper model file path by explicit model name.
+/// Falls back to the dictation model if the given name doesn't resolve.
+#[cfg(feature = "whisper")]
+pub fn resolve_model_path_by_name(
+    model_name: &str,
+    config: &Config,
+) -> Result<PathBuf, TranscribeError> {
+    let model_dir = &config.transcription.model_path;
+
+    let candidates = [
+        model_dir.join(format!("ggml-{}.bin", model_name)),
+        model_dir.join(format!("whisper-{}.bin", model_name)),
+        model_dir.join(format!("{}.bin", model_name)),
+    ];
+
+    for candidate in &candidates {
+        if candidate.exists() {
+            return Ok(candidate.clone());
+        }
+    }
+
+    let direct = PathBuf::from(model_name);
+    if direct.exists() {
+        return Ok(direct);
+    }
+
+    // Fall back to dictation model with a warning
+    let model_dir_display = model_dir.display().to_string();
+    let requested = model_name.to_string();
+    let dictation_model = &config.dictation.model;
+    tracing::warn!(
+        requested = %requested,
+        fallback = %dictation_model,
+        "live transcript model not found, falling back to dictation model"
+    );
+    resolve_model_path_for_dictation(config).map_err(|_| {
+        TranscribeError::ModelNotFound(format!(
+            "Expected model file \"ggml-{}.bin\" in {}",
+            requested, model_dir_display,
+        ))
+    })
+}
+
 /// Resolve the whisper model file path.
 #[cfg(feature = "whisper")]
 fn resolve_model_path(config: &Config) -> Result<PathBuf, TranscribeError> {

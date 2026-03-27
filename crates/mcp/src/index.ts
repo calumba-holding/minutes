@@ -1777,6 +1777,103 @@ server.tool(
   }
 );
 
+// ── Tool: start_live_transcript ──────────────────────────────
+
+server.tool(
+  "start_live_transcript",
+  "Start a live transcript session. Records audio and transcribes in real-time, writing utterances to a JSONL file. Use read_live_transcript to read the transcript during the session. Runs until stop is called.",
+  {},
+  { title: "Start Live Transcript", readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+  async () => {
+    if (!(await isCliAvailable())) {
+      return { content: [{ type: "text" as const, text: CLI_INSTALL_MSG }] };
+    }
+    // Pre-flight checks with short timeouts (these are instant file reads)
+    const { stdout: statusOut } = await runMinutes(["status"], 5000);
+    const status = parseJsonOutput(statusOut);
+    if (status.recording) {
+      return {
+        content: [{ type: "text" as const, text: "Recording in progress — stop recording before starting live transcript." }],
+      };
+    }
+
+    // Check if a live transcript is already running
+    try {
+      const { stdout: ltStatus } = await runMinutes(["transcript", "--status", "--format", "json"], 5000);
+      const ltParsed = parseJsonOutput(ltStatus);
+      if (ltParsed?.active) {
+        return {
+          content: [{ type: "text" as const, text: "Live transcript already running. Use read_live_transcript to read it, or minutes stop to end it." }],
+        };
+      }
+    } catch { /* no active session, proceed */ }
+
+    // Spawn detached live transcript process
+    const child = spawn(MINUTES_BIN, ["live"], {
+      detached: true,
+      stdio: "ignore",
+      env: { ...process.env, RUST_LOG: "info" },
+    });
+    child.unref();
+
+    // Verify the session actually started
+    await new Promise((r) => setTimeout(r, 1000));
+    try {
+      const { stdout: verifyOut } = await runMinutes(["transcript", "--status", "--format", "json"], 5000);
+      const verifyStatus = parseJsonOutput(verifyOut);
+      if (verifyStatus?.active) {
+        return {
+          content: [{ type: "text" as const, text: "Live transcript started. Use read_live_transcript to read the transcript. Use minutes stop to end the session." }],
+        };
+      }
+    } catch { /* fall through to error */ }
+
+    return {
+      content: [{ type: "text" as const, text: "Live transcript may have failed to start. Check minutes health or try again. Common causes: no microphone, whisper model not downloaded, or another session already active." }],
+      isError: true,
+    };
+  }
+);
+
+// ── Tool: read_live_transcript ──────────────────────────────
+
+server.tool(
+  "read_live_transcript",
+  "Read the live transcript. Returns utterances as JSON lines. Use 'since' to get only new lines since a cursor (line number) or time window (e.g., '5m', '30s'). Use 'status' mode to check if a session is active.",
+  {
+    since: z.string().optional().describe("Line number (e.g., '42') or duration (e.g., '5m', '30s'). Omit to get all lines."),
+    status_only: z.boolean().optional().default(false).describe("If true, return session status instead of transcript lines"),
+  },
+  { title: "Read Live Transcript", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  async ({ since, status_only }) => {
+    if (!(await isCliAvailable())) {
+      return { content: [{ type: "text" as const, text: CLI_INSTALL_MSG }] };
+    }
+
+    const args = ["transcript", "--format", "json"];
+    if (status_only) {
+      args.push("--status");
+    } else if (since) {
+      args.push("--since", since);
+    }
+
+    try {
+      const { stdout } = await runMinutes(args, 10000);
+      // For status queries, a message is helpful. For transcript reads, empty = no new lines.
+      const fallback = status_only ? "No transcript data available." : "";
+      return {
+        content: [{ type: "text" as const, text: stdout || fallback }],
+      };
+    } catch (error: any) {
+      const msg = error?.stderr || error?.message || String(error);
+      return {
+        content: [{ type: "text" as const, text: `Failed to read transcript: ${msg}` }],
+        isError: true,
+      };
+    }
+  }
+);
+
 // ── Start server ────────────────────────────────────────────
 
 async function main() {

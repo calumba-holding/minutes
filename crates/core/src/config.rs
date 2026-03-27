@@ -26,6 +26,7 @@ pub struct Config {
     pub vault: VaultConfig,
     pub dictation: DictationConfig,
     pub voice: VoiceConfig,
+    pub live_transcript: LiveTranscriptConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -215,6 +216,28 @@ impl Default for VaultConfig {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LiveTranscriptConfig {
+    /// Whisper model to use for live transcription.
+    /// Empty string means "use the dictation model".
+    pub model: String,
+    /// Maximum utterance length in seconds before force-finalizing.
+    pub max_utterance_secs: u64,
+    /// Whether to save raw WAV alongside JSONL for post-meeting reprocessing.
+    pub save_wav: bool,
+}
+
+impl Default for LiveTranscriptConfig {
+    fn default() -> Self {
+        Self {
+            model: String::new(), // empty = use dictation model
+            max_utterance_secs: 30,
+            save_wav: true,
+        }
+    }
+}
+
 impl Default for ScreenContextConfig {
     fn default() -> Self {
         Self {
@@ -279,6 +302,7 @@ impl Default for Config {
             vault: VaultConfig::default(),
             dictation: DictationConfig::default(),
             voice: VoiceConfig::default(),
+            live_transcript: LiveTranscriptConfig::default(),
         }
     }
 }
