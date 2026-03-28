@@ -665,7 +665,7 @@ agent_args = []           # Optional extra args, e.g. ["--dangerously-skip-permi
 ```
 minutes/
 ├── crates/core/    17 Rust modules — the engine (shared by all interfaces)
-├── crates/cli/     CLI binary — 15 commands
+├── crates/cli/     CLI binary — recording, search, health, and workflow commands
 ├── crates/reader/  Lightweight read-only meeting parser (no audio deps)
 ├── crates/mcp/     MCP server — 15 tools + 7 resources + interactive dashboard
 │   └── ui/         MCP App dashboard (vanilla TS → single-file HTML)

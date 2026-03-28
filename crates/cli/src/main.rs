@@ -51,6 +51,13 @@ enum Commands {
     /// Check if a recording is in progress
     Status,
 
+    /// Show effective Minutes paths from the loaded config
+    Paths {
+        /// Output raw JSON instead of formatted text
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Search meeting transcripts and voice memos
     Search {
         /// Text to search for
@@ -428,6 +435,7 @@ fn main() -> Result<()> {
         Commands::Note { text, meeting } => cmd_note(&text, meeting.as_deref(), &config),
         Commands::Stop => cmd_stop(&config),
         Commands::Status => cmd_status(),
+        Commands::Paths { json } => cmd_paths(json, &config),
         Commands::Search {
             query,
             content_type,
@@ -849,6 +857,31 @@ fn cmd_status() -> Result<()> {
     let status = minutes_core::pid::status();
     let json = serde_json::to_string_pretty(&status)?;
     println!("{}", json);
+    Ok(())
+}
+
+#[derive(Serialize)]
+struct PathsReport {
+    config_path: PathBuf,
+    minutes_dir: PathBuf,
+    output_dir: PathBuf,
+}
+
+fn cmd_paths(json: bool, config: &Config) -> Result<()> {
+    let report = PathsReport {
+        config_path: Config::config_path(),
+        minutes_dir: Config::minutes_dir(),
+        output_dir: config.output_dir.clone(),
+    };
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        println!("config_path: {}", report.config_path.display());
+        println!("minutes_dir: {}", report.minutes_dir.display());
+        println!("output_dir: {}", report.output_dir.display());
+    }
+
     Ok(())
 }
 

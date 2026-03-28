@@ -37,13 +37,19 @@ import {
 import { z } from "zod";
 import { execFile, spawn } from "child_process";
 import { promisify } from "util";
-import { existsSync, realpathSync } from "fs";
+import { existsSync } from "fs";
 import { readFile } from "fs/promises";
-import { dirname, extname, isAbsolute, join, relative, resolve } from "path";
+import { dirname, isAbsolute, join, relative } from "path";
 import { fileURLToPath } from "url";
 import { homedir } from "os";
 
 import * as reader from "minutes-sdk";
+import {
+  canonicalizeRoot,
+  expandHomeLikePath,
+  validatePathInDirectories,
+  validatePathInDirectory,
+} from "./paths.js";
 
 const UI_RESOURCE_URI = "ui://minutes/dashboard";
 
@@ -419,65 +425,6 @@ function parseJsonOutput(stdout: string): any {
   }
 }
 
-function canonicalizeFilePath(path: string): string {
-  if (!existsSync(path)) {
-    throw new Error(`Path does not exist: ${path}`);
-  }
-  return realpathSync(path);
-}
-
-function canonicalizeRoot(root: string): string {
-  // Roots may not exist yet (e.g. ~/.minutes/inbox on first run).
-  // Use realpath if it exists, otherwise lexical resolve.
-  return existsSync(root) ? realpathSync(root) : resolve(root);
-}
-
-function isWithinDirectory(candidate: string, root: string): boolean {
-  // Ensure root ends with separator to prevent prefix attacks (e.g. ~/meetings-evil)
-  const rootWithSep = root.endsWith("/") ? root : root + "/";
-  return candidate === root || candidate.startsWith(rootWithSep);
-}
-
-function validatePathInDirectory(path: string, root: string, allowedExts: string[]): string {
-  const canonicalPath = canonicalizeFilePath(path);
-  const canonicalRoot = canonicalizeRoot(root);
-
-  if (!allowedExts.includes(extname(canonicalPath).toLowerCase())) {
-    throw new Error(
-      `Access denied: path must be within ${canonicalRoot} and end with ${allowedExts.join(", ")}`
-    );
-  }
-
-  if (!isWithinDirectory(canonicalPath, canonicalRoot)) {
-    throw new Error(`Access denied: path must be within ${canonicalRoot}`);
-  }
-
-  return canonicalPath;
-}
-
-function validatePathInDirectories(
-  path: string,
-  roots: string[],
-  allowedExts: string[]
-): string {
-  const canonicalPath = canonicalizeFilePath(path);
-
-  if (!allowedExts.includes(extname(canonicalPath).toLowerCase())) {
-    throw new Error(
-      `Access denied: path must end with one of ${allowedExts.join(", ")}`
-    );
-  }
-
-  const canonicalRoots = roots.map((root) => canonicalizeRoot(root));
-  if (!canonicalRoots.some((root) => isWithinDirectory(canonicalPath, root))) {
-    throw new Error(
-      `Access denied: file must be inside one of ${canonicalRoots.join(", ")}`
-    );
-  }
-
-  return canonicalPath;
-}
-
 // ── MCP Server ──────────────────────────────────────────────
 
 const server = new McpServer({
@@ -493,8 +440,39 @@ const server = new McpServer({
 } as any);
 
 // Configurable directories — override via env vars in Claude Desktop extension settings
-const MEETINGS_DIR = process.env.MEETINGS_DIR || join(homedir(), "meetings");
-const MINUTES_HOME = process.env.MINUTES_HOME || join(homedir(), ".minutes");
+const MEETINGS_DIR = canonicalizeRoot(
+  expandHomeLikePath(process.env.MEETINGS_DIR || join(homedir(), "meetings"))
+);
+const MINUTES_HOME = canonicalizeRoot(
+  expandHomeLikePath(process.env.MINUTES_HOME || join(homedir(), ".minutes"))
+);
+let effectiveMeetingsDirPromise: Promise<string> | null = null;
+
+async function getEffectiveMeetingsDir(): Promise<string> {
+  if (effectiveMeetingsDirPromise) {
+    return effectiveMeetingsDirPromise;
+  }
+
+  effectiveMeetingsDirPromise = (async () => {
+    if (!(await isCliAvailable())) {
+      return MEETINGS_DIR;
+    }
+
+    try {
+      const { stdout } = await runMinutes(["paths", "--json"]);
+      const parsed = parseJsonOutput(stdout);
+      if (parsed && typeof parsed.output_dir === "string" && parsed.output_dir.length > 0) {
+        return canonicalizeRoot(parsed.output_dir);
+      }
+    } catch {
+      // Fall back to the MCP-configured default when the CLI cannot report paths.
+    }
+
+    return MEETINGS_DIR;
+  })();
+
+  return effectiveMeetingsDirPromise;
+}
 
 // ── UI Resource: MCP App dashboard ──────────────────────────
 
@@ -1146,7 +1124,7 @@ registerAppTool(
   },
   async ({ path: filePath }) => {
     try {
-      const resolved = validatePathInDirectory(filePath, MEETINGS_DIR, [".md"]);
+      const resolved = validatePathInDirectory(filePath, await getEffectiveMeetingsDir(), [".md"]);
       const content = await readFile(resolved, "utf-8");
       return {
         content: [{ type: "text" as const, text: content }],
@@ -1178,7 +1156,7 @@ server.tool(
     }
     const allowedDirs = [
       join(MINUTES_HOME, "inbox"),
-      MEETINGS_DIR,
+      await getEffectiveMeetingsDir(),
       join(homedir(), "Downloads"),
     ];
     const audioExts = [".wav", ".m4a", ".mp3", ".ogg", ".webm"];
@@ -1230,7 +1208,7 @@ server.tool(
       if (meeting_path) {
         const resolved = validatePathInDirectory(
           meeting_path,
-          MEETINGS_DIR,
+          await getEffectiveMeetingsDir(),
           [".md"]
         );
         args.push("--meeting", resolved);
@@ -1569,7 +1547,7 @@ server.resource(
     const { stdout } = await runMinutes(["resolve", slug]);
     const parsed = parseJsonOutput(stdout);
     if (parsed.path) {
-      const validated = validatePathInDirectory(parsed.path, MEETINGS_DIR, [".md"]);
+      const validated = validatePathInDirectory(parsed.path, await getEffectiveMeetingsDir(), [".md"]);
       const content = await readFile(validated, "utf-8");
       return { contents: [{ uri: uri.href, mimeType: "text/markdown", text: content }] };
     }
@@ -1584,7 +1562,7 @@ server.resource(
   "minutes://ideas/recent",
   { description: "Recent voice memos and ideas captured from any device (last 14 days)" },
   async (uri) => {
-    const meetings = await reader.listMeetings(MEETINGS_DIR, 200);
+    const meetings = await reader.listMeetings(await getEffectiveMeetingsDir(), 200);
     const cutoff = new Date();
     cutoff.setDate(cutoff.getDate() - 14);
 
