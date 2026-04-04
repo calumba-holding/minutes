@@ -63,6 +63,11 @@ enum Commands {
         /// Shorthand for --intent call with auto-detected system audio device.
         #[arg(long)]
         call: bool,
+
+        /// Skip live recording — use an existing WAV file as mock recording
+        /// output and process it with full diagnostic logging.
+        #[arg(long, value_name = "WAV_FILE")]
+        diagnose: Option<PathBuf>,
     },
 
     /// Add a note to the current recording
@@ -580,6 +585,7 @@ fn main() -> Result<()> {
             device,
             source,
             call,
+            diagnose,
         } => {
             if let Some(lang) = language {
                 config.transcription.language = Some(lang);
@@ -621,6 +627,10 @@ fn main() -> Result<()> {
                 }
             } else if let Some(dev) = device {
                 config.recording.device = Some(dev);
+            }
+
+            if let Some(wav_path) = diagnose {
+                return cmd_diagnose(&wav_path, title.as_deref(), &config);
             }
 
             let effective_intent = if call && intent == "auto" {
@@ -2033,6 +2043,90 @@ fn cmd_process(
         "words": result.word_count,
     }))?;
     println!("{}", json);
+    Ok(())
+}
+
+/// Process an existing WAV file as a mock recording with full diagnostic output.
+/// Bypasses live mic capture — runs diarization, voice matching, and the full
+/// pipeline on the provided file so results can be reproduced deterministically.
+fn cmd_diagnose(path: &Path, title: Option<&str>, config: &Config) -> Result<()> {
+    if !path.exists() {
+        anyhow::bail!("file not found: {}", path.display());
+    }
+    config.ensure_dirs()?;
+
+    eprintln!("=== Diagnose: {} ===", path.display());
+    eprintln!();
+
+    // Step 1: Diarization
+    eprintln!("--- Diarization ---");
+    let diarize_result = minutes_core::diarize::diarize(path, config);
+    let diarization_embeddings = match &diarize_result {
+        Some(result) => {
+            eprintln!("  Speakers: {}", result.num_speakers);
+            for seg in &result.segments {
+                eprintln!("  [{} {:.1}s–{:.1}s]", seg.speaker, seg.start, seg.end);
+            }
+            for (label, emb) in &result.speaker_embeddings {
+                let rms = (emb.iter().map(|v| v * v).sum::<f32>() / emb.len() as f32).sqrt();
+                eprintln!("    {}: {} dims, rms={:.2}", label, emb.len(), rms);
+            }
+            result.speaker_embeddings.clone()
+        }
+        None => {
+            eprintln!("  No diarization result (disabled or failed).");
+            std::collections::HashMap::new()
+        }
+    };
+
+    // Step 2: Voice matching
+    eprintln!();
+    eprintln!("--- Voice Matching ---");
+    if config.voice.enabled && !diarization_embeddings.is_empty() {
+        let profiles = minutes_core::voice::open_db()
+            .ok()
+            .and_then(|conn| minutes_core::voice::load_all_with_embeddings(&conn).ok())
+            .unwrap_or_default();
+
+        if profiles.is_empty() {
+            eprintln!("  No enrolled voice profiles. Run `minutes enroll` first.");
+        } else {
+            eprintln!("  Enrolled profiles: {}", profiles.len());
+            for p in &profiles {
+                eprintln!("    {} ({})", p.name, p.person_slug);
+            }
+
+            let threshold = config.voice.match_threshold;
+            eprintln!("  Threshold: {:.2}", threshold);
+            eprintln!();
+
+            for (label, emb) in &diarization_embeddings {
+                eprintln!("  {} vs enrolled profiles:", label);
+                for p in &profiles {
+                    let sim = minutes_core::voice::cosine_similarity(emb, &p.embedding);
+                    let marker = if sim > threshold { " ✓ MATCH" } else { "" };
+                    eprintln!("    → {} : sim={:.4}{}", p.name, sim, marker);
+                }
+            }
+        }
+    } else if !config.voice.enabled {
+        eprintln!("  Voice matching disabled.");
+    } else {
+        eprintln!("  No speaker embeddings to match against.");
+    }
+
+    // Step 3: Full pipeline
+    eprintln!();
+    eprintln!("--- Pipeline ---");
+    let result = minutes_core::process(path, ContentType::Meeting, title, config)?;
+    eprintln!("  Output: {}", result.path.display());
+    eprintln!("  Title:  {}", result.title);
+    eprintln!("  Words:  {}", result.word_count);
+    eprintln!();
+
+    let content = std::fs::read_to_string(&result.path)?;
+    println!("{}", content);
+
     Ok(())
 }
 
