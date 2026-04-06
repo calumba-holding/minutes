@@ -2627,6 +2627,19 @@
             <div class="about-controls-meta" id="settings-agent-status"></div>
           </div>
         </div>
+        <div class="about-controls" id="settings-skip-permissions-row">
+          <div class="about-controls-copy">Auto-approve all tool calls</div>
+          <button class="btn btn-secondary btn-sm toggle-btn" id="settings-skip-permissions">Off</button>
+        </div>
+        <div class="about-controls-meta" id="settings-skip-permissions-hint" style="padding: 0 4px; margin-top: -8px; margin-bottom: 8px;"></div>
+        <div class="about-controls">
+          <div class="about-controls-group">
+            <div class="about-controls-copy">Extra launch flags</div>
+            <div class="about-controls-meta">Additional CLI arguments passed when starting the agent</div>
+            <input type="text" id="settings-agent-args" placeholder="e.g. --model sonnet" style="margin-top: 6px; width: 100%; padding: 6px 8px; border-radius: 8px; background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.1); color: var(--text); font-size: 13px; box-sizing: border-box;">
+            <div class="about-controls-meta" id="settings-agent-args-status" style="margin-top: 4px;"></div>
+          </div>
+        </div>
       </div>
 
       <!-- Storage -->
@@ -4542,6 +4555,22 @@
         for (const a of agents) { const o = document.createElement('option'); o.value = a.name; o.textContent = a.name; sel.appendChild(o); }
         sel.value = s.assistant.agent;
         document.getElementById('settings-agent-status').textContent = agents.length + ' agent(s) installed';
+        // Agent launch flags — separate skip-permissions toggle from extra args
+        const argsArr = s.assistant.agent_args || [];
+        const skipPerm = argsArr.includes('--dangerously-skip-permissions');
+        const extraArgs = argsArr.filter(a => a !== '--dangerously-skip-permissions');
+        setSettingsToggle('settings-skip-permissions', skipPerm);
+        document.getElementById('settings-skip-permissions-hint').textContent = skipPerm
+          ? 'The agent will run without asking for approval. Takes effect next session.'
+          : 'The agent will ask before running tools like file edits and shell commands.';
+        // Only show the toggle for agents that support it (claude, codex)
+        const skipRow = document.getElementById('settings-skip-permissions-row');
+        const skipHint = document.getElementById('settings-skip-permissions-hint');
+        const supportsSkip = ['claude', 'codex'].includes(s.assistant.agent);
+        skipRow.style.display = supportsSkip ? '' : 'none';
+        skipHint.style.display = supportsSkip ? '' : 'none';
+        document.getElementById('settings-agent-args').value = extraArgs.join(' ');
+        document.getElementById('settings-agent-args-status').textContent = extraArgs.length ? extraArgs.length + ' flag(s)' : '';
         // Call detection settings
         if (s.call_detection) {
           setSettingsToggle('settings-call-detection', s.call_detection.enabled);
@@ -4791,7 +4820,33 @@
       document.getElementById('settings-screen-interval-row').style.display = next ? '' : 'none';
     });
     document.getElementById('settings-screen-interval').addEventListener('change', (e) => invoke('cmd_set_setting', {section:'screen_context',key:'interval_secs',value:e.target.value}));
-    document.getElementById('settings-agent').addEventListener('change', (e) => invoke('cmd_set_setting', {section:'assistant',key:'agent',value:e.target.value}));
+    document.getElementById('settings-agent').addEventListener('change', async (e) => {
+      await invoke('cmd_set_setting', {section:'assistant',key:'agent',value:e.target.value});
+      const supportsSkip = ['claude', 'codex'].includes(e.target.value);
+      document.getElementById('settings-skip-permissions-row').style.display = supportsSkip ? '' : 'none';
+      document.getElementById('settings-skip-permissions-hint').style.display = supportsSkip ? '' : 'none';
+    });
+    // Helper: rebuild agent_args from toggle + text field and save
+    async function saveAgentArgs() {
+      const skipOn = document.getElementById('settings-skip-permissions').textContent.trim() === 'On';
+      const extra = document.getElementById('settings-agent-args').value.trim();
+      const parts = [];
+      if (skipOn) parts.push('--dangerously-skip-permissions');
+      if (extra) parts.push(...extra.split(/\s+/));
+      await invoke('cmd_set_setting', {section:'assistant',key:'agent_args',value:parts.join(' ')});
+      document.getElementById('settings-skip-permissions-hint').textContent = skipOn
+        ? 'The agent will run without asking for approval. Takes effect next session.'
+        : 'The agent will ask before running tools like file edits and shell commands.';
+      const extraCount = extra ? extra.split(/\s+/).length : 0;
+      document.getElementById('settings-agent-args-status').textContent = extraCount ? extraCount + ' flag(s)' : '';
+    }
+    document.getElementById('settings-skip-permissions').addEventListener('click', async () => {
+      const btn = document.getElementById('settings-skip-permissions');
+      const next = btn.textContent.trim() !== 'On';
+      setSettingsToggle('settings-skip-permissions', next);
+      await saveAgentArgs();
+    });
+    document.getElementById('settings-agent-args').addEventListener('change', () => saveAgentArgs());
 
     // Call detection settings handlers
     document.getElementById('settings-call-detection').addEventListener('click', async () => {

@@ -3438,6 +3438,13 @@ pub fn cmd_set_setting(section: String, key: String, value: String) -> Result<St
 
         // Assistant
         ("assistant", "agent") => config.assistant.agent = value.clone(),
+        ("assistant", "agent_args") => {
+            config.assistant.agent_args = if value.trim().is_empty() {
+                vec![]
+            } else {
+                value.split_whitespace().map(String::from).collect()
+            };
+        }
 
         // Call detection
         ("call_detection", "enabled") => {
