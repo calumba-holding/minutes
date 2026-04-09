@@ -1,10 +1,5 @@
 import { CopyButton } from "@/components/copy-button";
-
-// Bump this in lockstep with manifest.json on every release.
-// Can't import manifest.json directly: Vercel's project root is site/, so
-// parent files aren't in the build context. See PRE-RELEASE-CHECKLIST.md §9.
-const APPLE_SILICON_DMG =
-  "https://github.com/silverstein/minutes/releases/latest/download/Minutes_0.10.4_aarch64.dmg";
+import { APPLE_SILICON_DMG } from "@/lib/release";
 
 const featureGrid = [
   {

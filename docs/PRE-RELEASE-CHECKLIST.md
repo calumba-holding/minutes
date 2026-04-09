@@ -165,15 +165,21 @@ There are several user-visible surfaces that live OUTSIDE the minutes repo or th
 
 ### 9.1 Marketing site download link
 
-`site/app/page.tsx` has a hardcoded DMG download URL:
+The landing page imports a site-local generated DMG download constant:
 
-```tsx
-href="https://github.com/silverstein/minutes/releases/latest/download/Minutes_<VERSION>_aarch64.dmg"
+```ts
+site/lib/release.ts
 ```
 
-The `releases/latest` redirect IS correct, but the filename includes the version. Bump the version in the filename and push to main. The site auto-deploys.
+The `releases/latest` redirect IS correct, but the filename includes the version. Refresh the generated file from `manifest.json` before shipping:
 
-A better long-term fix would be to ship a stable filename (e.g. `Minutes-latest-aarch64.dmg` as a copied asset, or a redirect endpoint). For now, just bump.
+```bash
+node scripts/sync_site_release_version.mjs
+```
+
+CI now runs `node scripts/sync_site_release_version.mjs --check`, so a drifted site download version should fail loudly instead of silently shipping a broken CTA.
+
+A better long-term fix would be to ship a stable filename (e.g. `Minutes-latest-aarch64.dmg` as a copied asset, or a redirect endpoint). For now, sync the generated file.
 
 ### 9.2 Homebrew tap (`silverstein/homebrew-tap`)
 

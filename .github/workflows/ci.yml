@@ -210,3 +210,17 @@ jobs:
       - name: TypeScript check
         working-directory: crates/mcp
         run: npx tsc --noEmit
+
+  site_release_consistency:
+    name: Site Release Link Consistency
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Verify site release constants match manifest
+        run: node scripts/sync_site_release_version.mjs --check
