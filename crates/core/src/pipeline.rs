@@ -436,7 +436,8 @@ fn attribute_meeting_speakers(
     content_type: ContentType,
     source: Option<&str>,
     config: &Config,
-    attribution_attendees: &[String],
+    trusted_attendees: &[String],
+    llm_attendees: &[String],
     diarization_num_speakers: usize,
     diarization_from_stems: bool,
     diarization_embeddings: &std::collections::HashMap<String, Vec<f32>>,
@@ -461,15 +462,15 @@ fn attribute_meeting_speakers(
             .map(|a| a.speaker_label.clone())
             .collect();
 
-        if !attribution_attendees.is_empty()
-            && diarization_num_speakers == attribution_attendees.len()
+        if !trusted_attendees.is_empty()
+            && diarization_num_speakers == trusted_attendees.len()
             && diarization_num_speakers == 2
             && transcript_labels.len() == 2
             && l2_labels.is_empty()
         {
             if let Some(my_name) = config.identity.name.as_ref() {
                 let my_slug = slugify(my_name);
-                let other = attribution_attendees
+                let other = trusted_attendees
                     .iter()
                     .find(|attendee| slugify(attendee) != my_slug);
                 if let Some(other_name) = other {
@@ -534,7 +535,9 @@ fn attribute_meeting_speakers(
             false
         });
         if has_unmapped {
-            for attribution in summarize::map_speakers(&transcript, attribution_attendees, config) {
+            // Keep L0 deterministic mapping fenced to trusted attendees; the
+            // broader merged attendee list is only for the L1 name-mapping fallback.
+            for attribution in summarize::map_speakers(&transcript, llm_attendees, config) {
                 if !mapped_labels.contains(&attribution.speaker_label) {
                     speaker_map.push(attribution);
                 }
@@ -939,15 +942,7 @@ where
         tracing::info!(dir = %screen_dir.display(), "screen captures cleaned up");
     }
 
-    let mut attendees = artifact.frontmatter.attendees.clone();
-    let mut seen_lower: std::collections::HashSet<String> =
-        attendees.iter().map(|name| name.to_lowercase()).collect();
-    for participant in &summary_participants {
-        let lower = participant.to_lowercase();
-        if !lower.is_empty() && seen_lower.insert(lower) {
-            attendees.push(participant.clone());
-        }
-    }
+    let attendees = merge_attendees(&artifact.frontmatter.attendees, &summary_participants);
 
     let attribution_start = std::time::Instant::now();
     let attribution = attribute_meeting_speakers(
@@ -956,6 +951,7 @@ where
         artifact.frontmatter.source.as_deref(),
         config,
         &artifact.frontmatter.attendees,
+        &attendees,
         diarization_num_speakers,
         diarization_from_stems,
         &diarization_embeddings,
@@ -1272,16 +1268,7 @@ where
         tracing::info!(event = %title, attendees = calendar_attendees.len(), "matched calendar event");
     }
 
-    // Merge attendees: calendar + transcript participants (deduplicate, case-insensitive)
-    let mut attendees: Vec<String> = Vec::new();
-    let mut seen_lower: std::collections::HashSet<String> = std::collections::HashSet::new();
-
-    for name in calendar_attendees.iter().chain(summary_participants.iter()) {
-        let lower = name.to_lowercase();
-        if !lower.is_empty() && seen_lower.insert(lower) {
-            attendees.push(name.clone());
-        }
-    }
+    let attendees = merge_attendees(&calendar_attendees, &summary_participants);
 
     if !attendees.is_empty() {
         tracing::info!(attendees = ?attendees, "merged attendee list");
@@ -1296,6 +1283,7 @@ where
         sidecar.and_then(|metadata| metadata.source.as_deref()),
         config,
         &calendar_attendees,
+        &attendees,
         diarization_num_speakers,
         diarization_from_stems,
         &diarization_embeddings,
@@ -1523,10 +1511,16 @@ fn title_from_context(context: &str) -> Option<String> {
 
 fn title_from_transcript(transcript: &str) -> Option<String> {
     let first_line = transcript.lines().find_map(clean_transcript_line)?;
-    let stripped = strip_lead_in_phrase(&first_line);
+    let conversationally_stripped = strip_conversational_prefixes(&first_line);
+    let stripped = strip_lead_in_phrase(&conversationally_stripped);
     let candidate = normalize_space(&stripped);
 
     if candidate.is_empty() {
+        return None;
+    }
+
+    if is_unusable_transcript_title(&candidate) {
+        tracing::debug!(candidate = %candidate, "rejecting generic conversational title candidate");
         return None;
     }
 
@@ -1607,6 +1601,132 @@ fn strip_lead_in_phrase(line: &str) -> String {
 
 fn normalize_space(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn merge_attendees(existing: &[String], additions: &[String]) -> Vec<String> {
+    let mut attendees = existing.to_vec();
+    let mut seen_lower: std::collections::HashSet<String> =
+        attendees.iter().map(|name| name.to_lowercase()).collect();
+    for participant in additions {
+        let lower = participant.to_lowercase();
+        if !lower.is_empty() && seen_lower.insert(lower) {
+            attendees.push(participant.clone());
+        }
+    }
+    attendees
+}
+
+fn strip_conversational_prefixes(line: &str) -> String {
+    let mut remaining = line.trim();
+    let fillers = ["okay", "ok", "so", "well", "alright", "all right"];
+
+    loop {
+        let lower = remaining.to_lowercase();
+        let mut stripped = false;
+
+        for filler in fillers {
+            if let Some(rest) = lower.strip_prefix(filler) {
+                if rest.is_empty() {
+                    return String::new();
+                }
+
+                if rest.starts_with(|c: char| {
+                    c == ',' || c == '.' || c == '!' || c == '?' || c.is_whitespace()
+                }) {
+                    remaining = remaining[filler.len()..]
+                        .trim_start_matches(|c: char| {
+                            c == ',' || c == '.' || c == '!' || c == '?' || c.is_whitespace()
+                        })
+                        .trim_start();
+                    stripped = true;
+                    break;
+                }
+            }
+        }
+
+        if !stripped {
+            return remaining.to_string();
+        }
+    }
+}
+
+fn transcript_title_words(candidate: &str) -> Vec<String> {
+    candidate
+        .split_whitespace()
+        .map(|word| {
+            word.trim_matches(|c: char| !c.is_alphanumeric() && c != '\'' && c != '-')
+                .to_lowercase()
+        })
+        .filter(|word| !word.is_empty())
+        .collect()
+}
+
+fn is_unusable_transcript_title(candidate: &str) -> bool {
+    let words = transcript_title_words(candidate);
+    if words.is_empty() {
+        return true;
+    }
+
+    let lower = words.join(" ");
+    let greetings = ["hey", "hi", "hello"];
+    if greetings.contains(&words[0].as_str()) && words.len() <= 4 {
+        return true;
+    }
+
+    let generic_prefixes = [
+        "this is a meeting",
+        "this is the meeting",
+        "this is a call",
+        "this is the call",
+        "this is a recording",
+        "this is the recording",
+        "this is a test",
+        "this is just a test",
+    ];
+    if generic_prefixes
+        .iter()
+        .any(|prefix| lower.starts_with(prefix))
+    {
+        return true;
+    }
+
+    let generic_words = [
+        "a",
+        "all",
+        "alright",
+        "and",
+        "be",
+        "call",
+        "doing",
+        "for",
+        "gonna",
+        "going",
+        "here",
+        "is",
+        "just",
+        "meeting",
+        "now",
+        "ok",
+        "okay",
+        "recording",
+        "right",
+        "so",
+        "test",
+        "that",
+        "the",
+        "this",
+        "uh",
+        "um",
+        "we",
+        "we're",
+        "well",
+    ];
+    let informative_words: Vec<&String> = words
+        .iter()
+        .filter(|word| !generic_words.contains(&word.as_str()))
+        .collect();
+
+    informative_words.is_empty()
 }
 
 fn to_display_title(text: &str) -> String {
@@ -2022,6 +2142,13 @@ mod tests {
     }
 
     #[test]
+    fn generate_title_strips_conversational_fillers_before_lead_in_phrase() {
+        let transcript = "Okay, let's talk about API launch timeline for Q2";
+        let title = generate_title(transcript, None);
+        assert_eq!(title, "API Launch Timeline for Q2");
+    }
+
+    #[test]
     fn generate_title_prefers_context_when_available() {
         let transcript = "Okay so I just had an idea about onboarding";
         let title = generate_title(transcript, Some("Q2 pricing discussion with Alex"));
@@ -2031,6 +2158,20 @@ mod tests {
     #[test]
     fn generate_title_falls_back_when_only_timestamps_exist() {
         let transcript = "[0:00]";
+        let title = generate_title(transcript, None);
+        assert_eq!(title, "Untitled Recording");
+    }
+
+    #[test]
+    fn generate_title_rejects_greeting_only_openers() {
+        let transcript = "[UNKNOWN 0:08] >> Hey, Matt.";
+        let title = generate_title(transcript, None);
+        assert_eq!(title, "Untitled Recording");
+    }
+
+    #[test]
+    fn generate_title_rejects_generic_meeting_openers() {
+        let transcript = "Okay, this is a meeting that we're gonna be doing here";
         let title = generate_title(transcript, None);
         assert_eq!(title, "Untitled Recording");
     }
@@ -2298,6 +2439,7 @@ mod tests {
             None,
             &config,
             &["Mat".into(), "Alex".into()],
+            &["Mat".into(), "Alex".into()],
             2,
             true,
             &std::collections::HashMap::new(),
@@ -2312,6 +2454,15 @@ mod tests {
     }
 
     #[test]
+    fn merge_attendees_adds_summary_participants_case_insensitively() {
+        let merged = merge_attendees(
+            &["Mat".into(), "Alex".into()],
+            &["alex".into(), "Casey".into()],
+        );
+        assert_eq!(merged, vec!["Mat", "Alex", "Casey"]);
+    }
+
+    #[test]
     fn native_call_without_trusted_attendees_maps_only_local_voice_source() {
         let mut config = Config::default();
         config.identity.name = Some("Mat".into());
@@ -2321,6 +2472,7 @@ mod tests {
             ContentType::Meeting,
             Some("native-call"),
             &config,
+            &[],
             &[],
             2,
             true,
